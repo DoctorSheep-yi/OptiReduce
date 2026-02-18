@@ -1,7 +1,7 @@
 # CSCI 8795 Cloud Computing System
 ## Who we are
 * Boyang Yi
-* Dharma Tejaswini Janga
+* Dharma Tejaswini Janga 
 * [Name]
 * [Name]
 ## What this project does

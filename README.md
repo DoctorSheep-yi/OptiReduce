@@ -1,7 +1,7 @@
 # CSCI 8795 Cloud Computing System
 ## Who we are
 * Boyang Yi
-* [Name]
+* Rishika Reddy Egamamidi
 * [Name]
 * [Name]
 ## What this project does

@@ -2,7 +2,7 @@
 ## Who we are
 * Boyang Yi
 * Dharma Tejaswini Janga
-* [Name]
+* Dhenuka Chelumalla
 * Rishika Reddy Egamamidi
 ## What this project does
 * This project studies distributed deep learning in cloud environments by reproducing and analyzing the key ideas from the paper OptiReduce: Resilient and Tail-Optimal AllReduce for Distributed Deep Learning in the Cloud.

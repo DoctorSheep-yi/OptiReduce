@@ -1,7 +1,7 @@
 # CSCI 8795 Cloud Computing System
 ## Who we are
 * Boyang Yi
-* [Name]
+* Dhenuka Chelumalla
 * [Name]
 * [Name]
 ## What this project does

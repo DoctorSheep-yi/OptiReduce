@@ -1,68 +1,102 @@
 import socket
 import argparse
 import random
-import select
 import struct
-import time
+import threading
 
 PORT = 9000
-TIMEOUT = 5000000  # 50 ms
+stop_event = threading.Event()
 
-def run_udp_send(peer):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    value = random.randint(1, 1000)
-    msg = struct.pack("i", value)
-    sock.sendto(msg, (peer, PORT))
+# ================= UDP =================
 
-    print(f"[UDP-SEND] sent value {value} to {peer}")
-
-def run_udp_recv():
+def udp_recv():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("", PORT))
 
-    r, _, _ = select.select([sock], [], [], TIMEOUT)
-    if r:
+    while not stop_event.is_set():
         data, addr = sock.recvfrom(1024)
         value = struct.unpack("i", data)[0]
-        print(f"[UDP-RECV] received value {value} from {addr}")
-    else:
-        print("[UDP-RECV] timeout, no value received")
+        print(f"[UDP-RECV] {value} from {addr}")
 
-def run_tcp_send(peer):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((peer, PORT))
+
+def udp_send(ip):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     value = random.randint(1, 1000)
     msg = struct.pack("i", value)
-    sock.sendall(msg)
 
-    print(f"[TCP-SEND] sent value {value} to {peer}")
-    sock.close()
+    sock.sendto(msg, (ip, PORT))
+    print(f"[UDP-SEND] {value} -> {ip}")
 
-def run_tcp_recv():
+
+# ================= TCP =================
+
+def tcp_recv():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind(("", PORT))
-    server.listen(1)
+    server.listen()
 
-    conn, addr = server.accept()
-    data = conn.recv(4)
-    value = struct.unpack("i", data)[0]
+    while not stop_event.is_set():
+        conn, addr = server.accept()
 
-    print(f"[TCP-RECV] received value {value} from {addr}")
-    conn.close()
+        data = conn.recv(4)
+        if data:
+            value = struct.unpack("i", data)[0]
+            print(f"[TCP-RECV] {value} from {addr}")
+
+        conn.close()
+
+
+def tcp_send(ip):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((ip, PORT))
+
+    value = random.randint(1, 1000)
+    msg = struct.pack("i", value)
+
+    sock.sendall(msg)
+    print(f"[TCP-SEND] {value} -> {ip}")
+
+    sock.close()
+
+
+# ================= MAIN =================
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["udp-send", "udp-recv", "tcp-send", "tcp-recv"], required=True)
-    ap.add_argument("--peer", help="receiver IP (send modes only)")
+    ap.add_argument("--mode", choices=["udp", "tcp"], required=True)
     args = ap.parse_args()
 
-    if args.mode == "udp-send":
-        run_udp_send(args.peer)
-    elif args.mode == "udp-recv":
-        run_udp_recv()
-    elif args.mode == "tcp-send":
-        run_tcp_send(args.peer)
-    elif args.mode == "tcp-recv":
-        run_tcp_recv()
+    # start receiver thread
+    if args.mode == "udp":
+        threading.Thread(target=udp_recv, daemon=True).start()
+    else:
+        threading.Thread(target=tcp_recv, daemon=True).start()
+
+    print("Commands:")
+    print("send <ip>")
+    print("quit")
+
+    while True:
+        cmd = input("> ").strip()
+
+        if cmd == "quit":
+            stop_event.set()
+            break
+
+        if cmd.startswith("send"):
+            parts = cmd.split()
+
+            if len(parts) != 2:
+                print("Usage: send <ip>")
+                continue
+
+            ip = parts[1]
+
+            if args.mode == "udp":
+                udp_send(ip)
+            else:
+                tcp_send(ip)
+
+    print("Program exited.")

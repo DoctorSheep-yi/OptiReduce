@@ -1,102 +1,196 @@
 import socket
 import argparse
-import random
-import struct
 import threading
+import struct
+import pickle
+import random
+import sys
+
+COORDINATOR_IP = "172.21.102.115"
+COORDINATOR_PORT = 8000
 
 PORT = 9000
-stop_event = threading.Event()
 
 
-# ================= UDP =================
+# =========================
+# NODE
+# =========================
 
-def udp_recv():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("", PORT))
+class Node:
+    def __init__(self, mode):
+        self.mode = mode
+        self.peers = []
+        self.node_id = None
+        self.num_nodes = None
 
-    while not stop_event.is_set():
-        data, addr = sock.recvfrom(1024)
-        value = struct.unpack("i", data)[0]
-        print(f"[UDP-RECV] {value} from {addr}")
+        self.lock = threading.Lock()
 
+    # -------------------------
+    # REGISTER
+    # -------------------------
+    def register(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((COORDINATOR_IP, COORDINATOR_PORT))
 
-def udp_send(ip):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        msg = {
+            "type": "REGISTER",
+            "port": PORT
+        }
 
-    value = random.randint(1, 1000)
-    msg = struct.pack("i", value)
+        sock.sendall(pickle.dumps(msg))
+        sock.close()
 
-    sock.sendto(msg, (ip, PORT))
-    print(f"[UDP-SEND] {value} -> {ip}")
+    # -------------------------
+    # SERVER
+    # -------------------------
+    def start_server(self):
+        if self.mode == "tcp":
+            threading.Thread(target=self.tcp_server, daemon=True).start()
+        else:
+            threading.Thread(target=self.udp_server, daemon=True).start()
 
+    def tcp_server(self):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("0.0.0.0", PORT))
+        server.listen()
 
-# ================= TCP =================
+        print("[TCP] Listening...")
 
-def tcp_recv():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(("", PORT))
-    server.listen()
+        while True:
+            conn, addr = server.accept()
+            threading.Thread(target=self.handle_tcp, args=(conn,), daemon=True).start()
 
-    while not stop_event.is_set():
-        conn, addr = server.accept()
+    def handle_tcp(self, conn):
+        data = conn.recv(4096)
 
-        data = conn.recv(4)
-        if data:
-            value = struct.unpack("i", data)[0]
-            print(f"[TCP-RECV] {value} from {addr}")
+        # Try coordinator message
+        try:
+            msg = pickle.loads(data)
+
+            if msg["type"] == "PEER_UPDATE":
+                self.peers = msg["peers"]
+                self.node_id = msg["node_id"]
+                self.num_nodes = len(self.peers)
+
+                print(f"\n[Node] Updated peers: {self.peers}")
+                print(f"My ID: {self.node_id}\n")
+                return
+
+            elif msg["type"] == "DATA":
+                print(f"[RECV][TCP] From Node {msg['from']} → {msg['value']}")
+                return
+
+        except:
+            pass
 
         conn.close()
 
+    def udp_server(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("0.0.0.0", PORT))
 
-def tcp_send(ip):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((ip, PORT))
+        print("[UDP] Listening...")
 
-    value = random.randint(1, 1000)
-    msg = struct.pack("i", value)
+        while True:
+            data, addr = sock.recvfrom(4096)
 
-    sock.sendall(msg)
-    print(f"[TCP-SEND] {value} -> {ip}")
+            try:
+                msg = pickle.loads(data)
 
-    sock.close()
+                if msg["type"] == "PEER_UPDATE":
+                    self.peers = msg["peers"]
+                    self.node_id = msg["node_id"]
+                    self.num_nodes = len(self.peers)
+
+                    print(f"\n[Node] Updated peers: {self.peers}")
+                    print(f"My ID: {self.node_id}\n")
+                    continue
+
+                elif msg["type"] == "DATA":
+                    print(f"[RECV][UDP] From Node {msg['from']} → {msg['value']}")
+                    continue
+
+            except:
+                pass
+
+    # -------------------------
+    # SEND RANDOM NUMBER
+    # -------------------------
+    def send_random(self, target_id):
+        if target_id >= self.num_nodes:
+            print("Invalid target node")
+            return
+
+        ip, port = self.peers[target_id]
+
+        value = random.randint(0, 100)
+
+        msg = {
+            "type": "DATA",
+            "from": self.node_id,
+            "value": value
+        }
+
+        payload = pickle.dumps(msg)
+
+        print(f"[SEND] → Node {target_id} ({ip}) : {value}")
+
+        if self.mode == "tcp":
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.connect((ip, port))
+            sock.sendall(payload)
+            sock.close()
+        else:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.sendto(payload, (ip, port))
+
+    # -------------------------
+    # RUN
+    # -------------------------
+    def run(self):
+        self.start_server()
+
+        print("Commands:")
+        print("register")
+        print("send <node_id>")
+        print("quit")
+
+        while True:
+            cmd = input("> ").strip()
+
+            if cmd == "register":
+                self.register()
+
+            elif cmd.startswith("send"):
+                if self.num_nodes is None:
+                    print("Not registered yet!")
+                    continue
+
+                parts = cmd.split()
+                if len(parts) != 2:
+                    print("Usage: send <node_id>")
+                    continue
+
+                target = int(parts[1])
+                self.send_random(target)
+
+            elif cmd == "quit":
+                print("Shutting down node...")
+                sys.exit(0)
+
+            else:
+                print("Unknown command")
 
 
-# ================= MAIN =================
+# =========================
+# MAIN
+# =========================
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["udp", "tcp"], required=True)
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["tcp", "udp"], required=True)
 
-    # start receiver thread
-    if args.mode == "udp":
-        threading.Thread(target=udp_recv, daemon=True).start()
-    else:
-        threading.Thread(target=tcp_recv, daemon=True).start()
+    args = parser.parse_args()
 
-    print("Commands:")
-    print("send <ip>")
-    print("quit")
-
-    while True:
-        cmd = input("> ").strip()
-
-        if cmd == "quit":
-            stop_event.set()
-            break
-
-        if cmd.startswith("send"):
-            parts = cmd.split()
-
-            if len(parts) != 2:
-                print("Usage: send <ip>")
-                continue
-
-            ip = parts[1]
-
-            if args.mode == "udp":
-                udp_send(ip)
-            else:
-                tcp_send(ip)
-
-    print("Program exited.")
+    node = Node(args.mode)
+    node.run()

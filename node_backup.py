@@ -10,6 +10,7 @@ import PS
 
 COORDINATOR_IP = "172.21.102.115"
 COORDINATOR_PORT = 8000
+
 PORT = 9000
 
 
@@ -38,7 +39,7 @@ class Node:
 
         msg = {
             "type": "REGISTER",
-            "port": PORT
+            "port": COORDINATOR_PORT
         }
 
         sock.sendall(pickle.dumps(msg))

@@ -15,7 +15,6 @@ def shard_data(data, num_workers):
 
     return shards
 
-
 def combine_results(worker_results, method="average"):
     if not worker_results:
         return None

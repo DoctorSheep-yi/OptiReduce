@@ -1,9 +1,8 @@
 import socket
 import argparse
 import threading
-import struct
 import pickle
-import random
+import uuid
 import sys
 from matrix import generate_matrix
 import PS
@@ -12,10 +11,9 @@ COORDINATOR_IP = "172.21.102.115"
 COORDINATOR_PORT = 8000
 PORT = 9000
 
+UDP_SAFE = 1200
+CHUNK_SIZE = 1000
 
-# =========================
-# NODE
-# =========================
 
 class Node:
     def __init__(self, mode):
@@ -24,10 +22,9 @@ class Node:
         self.node_id = None
         self.num_nodes = None
 
-        # shard_id -> list of received shards
-        self.shard_buffer = {}
-
-        self.lock = threading.Lock()
+        self.received_matrices = []
+        self.chunk_buffer = {}
+        self.final_result = None
 
     # -------------------------
     # REGISTER
@@ -35,43 +32,41 @@ class Node:
     def register(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect((COORDINATOR_IP, COORDINATOR_PORT))
-
-        msg = {
-            "type": "REGISTER",
-            "port": PORT
-        }
-
+        msg = {"type": "REGISTER", "port": PORT}
         sock.sendall(pickle.dumps(msg))
         sock.close()
+
+    def unregister(self):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.connect((COORDINATOR_IP, COORDINATOR_PORT))
+            msg = {"type": "UNREGISTER", "port": PORT}
+            sock.sendall(pickle.dumps(msg))
+            sock.close()
+            print("[Node] Unregistered")
+        except Exception as e:
+            print("[Node] Unregister failed:", e)
 
     # -------------------------
     # SERVER
     # -------------------------
     def start_server(self):
-        if self.mode == "tcp":
-            threading.Thread(target=self.tcp_server, daemon=True).start()
-        else:
+        threading.Thread(target=self.tcp_server, daemon=True).start()
+        if self.mode == "udp":
             threading.Thread(target=self.udp_server, daemon=True).start()
 
-    # ---------------------------
-    # TCP SERVER
-    # ---------------------------
     def tcp_server(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.bind(("0.0.0.0", PORT))
         server.listen()
-
         print("[TCP] Listening...")
 
         while True:
-            conn, addr = server.accept()
-            threading.Thread(
-                target=self.handle_tcp, args=(conn,), daemon=True
-            ).start()
+            conn, _ = server.accept()
+            threading.Thread(target=self.handle_tcp, args=(conn,), daemon=True).start()
 
     def handle_tcp(self, conn):
         try:
-            # 🔹 receive full message (IMPORTANT)
             data = b''
             while True:
                 packet = conn.recv(4096)
@@ -80,37 +75,30 @@ class Node:
                 data += packet
 
             msg = pickle.loads(data)
-
-            self.process_message(msg, protocol="TCP")
+            self.process_message(msg)
 
         except Exception as e:
             print("[TCP ERROR]", e)
-
         finally:
             conn.close()
 
-    # ---------------------------
-    # UDP SERVER
-    # ---------------------------
     def udp_server(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(("0.0.0.0", PORT))
-
         print("[UDP] Listening...")
 
         while True:
             try:
-                data, addr = sock.recvfrom(65535)
+                data, _ = sock.recvfrom(65535)
                 msg = pickle.loads(data)
-                self.process_message(msg, protocol="UDP")
-
+                self.process_message(msg)
             except Exception as e:
                 print("[UDP ERROR]", e)
 
-    # ---------------------------
-    # MESSAGE PROCESSING
-    # ---------------------------
-    def process_message(self, msg, protocol="TCP"):
+    # -------------------------
+    # MESSAGE HANDLER
+    # -------------------------
+    def process_message(self, msg):
         msg_type = msg.get("type")
 
         if msg_type == "PEER_UPDATE":
@@ -118,74 +106,79 @@ class Node:
             self.node_id = msg["node_id"]
             self.num_nodes = len(self.peers)
 
-            print(f"\n[Node] Updated peers: {self.peers}")
+            print(f"\n[Node] Peers: {self.peers}")
             print(f"My ID: {self.node_id}\n")
 
         elif msg_type == "DATA":
-            self.handle_data(msg, protocol)
+            data = msg["data"]
+            print(f"[RECV] FULL from Node {msg['from']}")
+            self.received_matrices.append(data)
+            print(f"[STORE] total={len(self.received_matrices)}")
 
-    # ---------------------------
-    # HANDLE SHARD DATA
-    # ---------------------------
-    def handle_data(self, msg, protocol):
-        sender = msg["from"]
-        shard_id = msg["shard_id"]
-        shard = msg["data"]
+        elif msg_type == "DATA_CHUNK":
+            self.handle_chunk(msg)
 
-        print(f"[RECV][{protocol}] From Node {sender} → shard {shard_id}")
+        elif msg_type == "RESULT":
+            self.final_result = msg["data"]
+            print("[RESULT RECEIVED] (use 'show result')")
 
-        with self.lock:
-            if shard_id not in self.shard_buffer:
-                self.shard_buffer[shard_id] = []
-
-            self.shard_buffer[shard_id].append(shard)
-
-            # 🔹 check if all shards received
-            if len(self.shard_buffer[shard_id]) == self.num_nodes:
-                print(f"[AGGREGATE] Shard {shard_id} ready")
-
-                result = PS.combine_results(
-                    self.shard_buffer[shard_id], method="sum"
-                )
-
-                print(
-                    f"[RESULT] Shard {shard_id} aggregated "
-                    f"shape: {getattr(result, 'shape', len(result))}"
-                )
-
-                # clear buffer for next round
-                self.shard_buffer[shard_id] = []
-
-                #TODO: broadcast result to all nodes
-                # self.broadcast_result(shard_id, result)
+        elif msg_type == "RESULT_CHUNK":
+            self.handle_result_chunk(msg)
 
     # -------------------------
-    # SEND SHARD
+    # CHUNK HANDLING (DATA)
     # -------------------------
-    def send_shard(self, target_id, data):
-        if target_id >= self.num_nodes:
-            print("Invalid target node")
-            return
+    def handle_chunk(self, msg):
+        msg_id = msg["msg_id"]
+        seq = msg["seq"]
+        total = msg["total"]
+        chunk = msg["data"]
 
-        ip, port = self.peers[target_id]
+        if msg_id not in self.chunk_buffer:
+            self.chunk_buffer[msg_id] = [None] * total
 
-        # 🔹 create shards
-        shards = PS.shard_data(data, self.num_nodes)
+        self.chunk_buffer[msg_id][seq] = chunk
 
-        # 🔹 pick the shard for this target
-        shard = shards[target_id]
+        if all(c is not None for c in self.chunk_buffer[msg_id]):
+            full_payload = b''.join(self.chunk_buffer[msg_id])
+            full_msg = pickle.loads(full_payload)
 
-        msg = {
-            "type": "DATA",
-            "from": self.node_id,
-            "shard_id": target_id,   # important for server logic
-            "data": shard
-        }
+            data = full_msg["data"]
+            self.received_matrices.append(data)
 
-        payload = pickle.dumps(msg)
+            print(f"[RECV] Matrix reconstructed")
+            print(f"[STORE] total={len(self.received_matrices)}")
 
-        print(f"[SEND] → Node {target_id} shard shape: {getattr(shard, 'shape', len(shard))}")
+            del self.chunk_buffer[msg_id]
 
+    # -------------------------
+    # CHUNK HANDLING (RESULT)
+    # -------------------------
+    def handle_result_chunk(self, msg):
+        msg_id = msg["msg_id"]
+        seq = msg["seq"]
+        total = msg["total"]
+        chunk = msg["data"]
+
+        if msg_id not in self.chunk_buffer:
+            self.chunk_buffer[msg_id] = [None] * total
+
+        self.chunk_buffer[msg_id][seq] = chunk
+
+        if all(c is not None for c in self.chunk_buffer[msg_id]):
+            full_payload = b''.join(self.chunk_buffer[msg_id])
+            full_msg = pickle.loads(full_payload)
+
+            self.final_result = full_msg["data"]
+
+            print("[RESULT STORED] (use 'show result')")
+
+            del self.chunk_buffer[msg_id]
+
+    # -------------------------
+    # SEND HELPERS
+    # -------------------------
+    def _send_payload(self, ip, port, payload):
         if self.mode == "tcp":
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((ip, port))
@@ -194,46 +187,74 @@ class Node:
         else:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.sendto(payload, (ip, port))
-    # -------------------------
-    # SEND ALL SHARDs
-    # -------------------------
-    def send_all_shards(self, data):
-        shards = PS.shard_data(data, self.num_nodes)
 
-        for target_id in range(self.num_nodes):
-            ip, port = self.peers[target_id]
-            shard = shards[target_id]
+    def _send_large(self, ip, port, msg, chunk_type):
+        payload = pickle.dumps(msg)
 
-            msg = {
-                "type": "DATA",
-                "from": self.node_id,
-                "shard_id": target_id,
-                "data": shard
+        if len(payload) <= UDP_SAFE:
+            self._send_payload(ip, port, payload)
+            return
+
+        msg_id = str(uuid.uuid4())
+        total = (len(payload) + CHUNK_SIZE - 1) // CHUNK_SIZE
+
+        for i in range(total):
+            chunk = payload[i * CHUNK_SIZE:(i + 1) * CHUNK_SIZE]
+
+            chunk_msg = {
+                "type": chunk_type,
+                "msg_id": msg_id,
+                "seq": i,
+                "total": total,
+                "data": chunk
             }
 
-            payload = pickle.dumps(msg)
+            self._send_payload(ip, port, pickle.dumps(chunk_msg))
 
-            print(f"[SEND] → Node {target_id} shard shape: {getattr(shard, 'shape', len(shard))}")
+    # -------------------------
+    # SEND MATRIX
+    # -------------------------
+    def send_matrix(self, target_id, data):
+        ip, port = self.peers[target_id]
 
-            if self.mode == "tcp":
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.connect((ip, port))
-                sock.sendall(payload)
-                sock.close()
-            else:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                sock.sendto(payload, (ip, port))
+        msg = {
+            "type": "DATA",
+            "from": self.node_id,
+            "data": data
+        }
+
+        print(f"[SEND] → Node {target_id}")
+        self._send_large(ip, port, msg, "DATA_CHUNK")
+
+    # -------------------------
+    # BROADCAST RESULT
+    # -------------------------
+    def broadcast_result(self, result):
+        msg = {
+            "type": "RESULT",
+            "from": self.node_id,
+            "data": result
+        }
+
+        for i, (ip, port) in enumerate(self.peers):
+            print(f"[BROADCAST] → Node {i}")
+            self._send_large(ip, port, msg, "RESULT_CHUNK")
+
     # -------------------------
     # RUN
     # -------------------------
     def run(self):
         self.start_server()
 
+        matrix = None
+
         print("Commands:")
         print("register")
         print("generate matrix <size>")
         print("send <node_id>")
-        print("send_all")
+        print("sum")
+        print("multiply")
+        print("show result")
         print("quit")
 
         while True:
@@ -241,51 +262,53 @@ class Node:
 
             if cmd == "register":
                 self.register()
+
             elif cmd.startswith("generate matrix"):
-                parts = cmd.split()
-                if len(parts) != 3:
-                    print("Usage: generate matrix <size>")
-                    continue
-
-                size = int(parts[2])
+                size = int(cmd.split()[2])
                 matrix = generate_matrix(size)
-                print(f"Generated matrix of shape {matrix.shape}")
-            elif cmd.startswith("send") and cmd != "send_all":
-                if self.num_nodes is None:
-                    print("Not registered yet!")
+                print(f"Generated {matrix.shape}")
+
+            elif cmd.startswith("send"):
+                target = int(cmd.split()[1])
+                self.send_matrix(target, matrix)
+
+            elif cmd == "sum":
+                if not self.received_matrices:
+                    print("No matrices")
                     continue
 
-                parts = cmd.split()
-                if len(parts) != 2:
-                    print("Usage: send <node_id>")
+                result = PS.sum(self.received_matrices)
+                print("[SUM DONE]")
+                self.broadcast_result(result)
+
+            elif cmd == "multiply":
+                if not self.received_matrices:
+                    print("No matrices")
                     continue
 
-                target = int(parts[1])
-                self.send_shard(target, matrix)
+                result = PS.multiply(self.received_matrices)
+                print("[MULTIPLY DONE]")
+                self.broadcast_result(result)
 
-            elif cmd == "send_all":
-                if self.num_nodes is None:
-                    print("Not registered yet!")
-                    continue
-
-                self.send_all_shards(matrix)
+            elif cmd == "show result":
+                if self.final_result is None:
+                    print("No result available")
+                else:
+                    print("[RESULT]")
+                    print(self.final_result)
+                    print("shape:", self.final_result.shape)
 
             elif cmd == "quit":
-                print("Shutting down node...")
+                self.unregister()
                 sys.exit(0)
 
             else:
                 print("Unknown command")
 
 
-# =========================
-# MAIN
-# =========================
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["tcp", "udp"], required=True)
-
     args = parser.parse_args()
 
     node = Node(args.mode)

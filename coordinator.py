@@ -9,9 +9,8 @@ lock = threading.Lock()
 
 
 def broadcast():
-    """
-    Send updated peer list + node_id to all nodes
-    """
+    dead_nodes = []
+
     for idx, (ip, port) in enumerate(nodes):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -27,7 +26,21 @@ def broadcast():
             sock.close()
 
         except Exception as e:
-            print(f"Failed to send to {ip}: {e}")
+            print(f"[Coordinator] Failed to send to {ip}:{port}: {e}")
+            dead_nodes.append((ip, port))
+
+    # remove dead nodes automatically
+    if dead_nodes:
+        with lock:
+            for n in dead_nodes:
+                if n in nodes:
+                    nodes.remove(n)
+
+        print(f"[Coordinator] Cleaned dead nodes: {dead_nodes}")
+
+        # rebroadcast updated list
+        if nodes:
+            broadcast()
 
 
 def handle_conn(conn, addr):
@@ -43,9 +56,22 @@ def handle_conn(conn, addr):
             with lock:
                 if (ip, port) not in nodes:
                     nodes.append((ip, port))
-                    nodes.sort()  # IMPORTANT: consistent ordering
+                    nodes.sort()
 
             print(f"[Coordinator] Registered: {ip}:{port}")
+            print(f"[Coordinator] Nodes: {nodes}")
+
+            broadcast()
+
+        elif msg["type"] == "UNREGISTER":
+            ip = addr[0]
+            port = msg["port"]
+
+            with lock:
+                if (ip, port) in nodes:
+                    nodes.remove((ip, port))
+
+            print(f"[Coordinator] Unregistered: {ip}:{port}")
             print(f"[Coordinator] Nodes: {nodes}")
 
             broadcast()

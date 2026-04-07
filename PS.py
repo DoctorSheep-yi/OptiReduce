@@ -1,29 +1,38 @@
 # PS.py
+import numpy as np
 
-def shard_data(data, num_workers):
-    shard_size = len(data) // num_workers
-    shards = []
+def sum(matrices):
+    if not matrices:
+        raise ValueError("No matrices provided")
 
-    for i in range(num_workers):
-        start = i * shard_size
-        if i == num_workers - 1:
-            end = len(data)
-        else:
-            end = (i + 1) * shard_size
+    # check shape consistency
+    first_shape = matrices[0].shape
+    for m in matrices:
+        if m.shape != first_shape:
+            raise ValueError("All matrices must have the same shape for sum")
 
-        shards.append(data[start:end])
+    result = np.zeros_like(matrices[0])
 
-    return shards
+    for m in matrices:
+        result = result + m
 
-def combine_results(worker_results, method="average"):
-    if not worker_results:
-        return None
+    return result
 
-    if method == "sum":
-        return sum(worker_results)
+def multiply(matrices):
+    if not matrices:
+        raise ValueError("No matrices provided")
 
-    elif method == "average":
-        return sum(worker_results) / len(worker_results)
+    result = matrices[0]
 
-    else:
-        raise ValueError("Unsupported method")
+    for i in range(1, len(matrices)):
+        m = matrices[i]
+
+        # shape check: (n x k) @ (k x m)
+        if result.shape[1] != m.shape[0]:
+            raise ValueError(
+                f"Incompatible shapes: {result.shape} and {m.shape}"
+            )
+
+        result = result @ m
+
+    return result

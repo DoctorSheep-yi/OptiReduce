@@ -4,6 +4,7 @@ import threading
 import pickle
 import uuid
 import sys
+import numpy as np
 from matrix import generate_matrix
 import PS
 
@@ -110,7 +111,8 @@ class Node:
             print(f"My ID: {self.node_id}\n")
 
         elif msg_type == "DATA":
-            data = msg["data"]
+            data = np.array(msg["data"])
+
             print(f"[RECV] FULL from Node {msg['from']}")
             self.received_matrices.append(data)
             print(f"[STORE] total={len(self.received_matrices)}")
@@ -119,7 +121,7 @@ class Node:
             self.handle_chunk(msg)
 
         elif msg_type == "RESULT":
-            self.final_result = msg["data"]
+            self.final_result = np.array(msg["data"])
             print("[RESULT RECEIVED] (use 'show result')")
 
         elif msg_type == "RESULT_CHUNK":
@@ -143,7 +145,8 @@ class Node:
             full_payload = b''.join(self.chunk_buffer[msg_id])
             full_msg = pickle.loads(full_payload)
 
-            data = full_msg["data"]
+            data = np.array(full_msg["data"])
+
             self.received_matrices.append(data)
 
             print(f"[RECV] Matrix reconstructed")
@@ -169,7 +172,7 @@ class Node:
             full_payload = b''.join(self.chunk_buffer[msg_id])
             full_msg = pickle.loads(full_payload)
 
-            self.final_result = full_msg["data"]
+            self.final_result = np.array(full_msg["data"])
 
             print("[RESULT STORED] (use 'show result')")
 
@@ -220,7 +223,7 @@ class Node:
         msg = {
             "type": "DATA",
             "from": self.node_id,
-            "data": data
+            "data": data.tolist()
         }
 
         print(f"[SEND] → Node {target_id}")
@@ -233,7 +236,7 @@ class Node:
         msg = {
             "type": "RESULT",
             "from": self.node_id,
-            "data": result
+            "data": result.tolist()
         }
 
         for i, (ip, port) in enumerate(self.peers):

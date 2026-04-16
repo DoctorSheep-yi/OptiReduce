@@ -9,7 +9,7 @@ from matrix import generate_matrix
 from PS import run_ps
 from ring_allreduce import run_ring
 from optireduce import run_optireduce
-
+from noise import Noise
 from globals import *
 
 COORDINATOR_IP = "172.21.102.115"
@@ -18,254 +18,182 @@ PORT = 9000
 
 class Node:
     def __init__(self, mode):
-        self.mode = mode
+        self.mode = mode # 'tcp' or 'udp'
         self.peers = []
         self.node_id = None
         self.num_nodes = None
 
         self.local_matrix = None
-
         self.done_count = 0
         self.lock = threading.Lock()
 
         self.algo = None
         self.start_time = None
+        self.noise = Noise()
 
-        # shared buffers
+        # Buffers for algorithms
         self.ring_buffer = []
         self.opti_buffer = []
-        self.received = []
+        self.received = [] # For PS server
         self.chunk_buffer = {}
 
-    # -------------------------
-    # NETWORK SEND
-    # -------------------------
-    def _send_chunked(self, ip, port, msg):
+    def send(self, ip, port, msg, force_mode=None):
+        """Sends data. force_mode allows overriding the global mode (e.g., PS always needs reliability)."""
+        mode = force_mode if force_mode else self.mode
         data = pickle.dumps(msg)
 
-        chunk_id = str(uuid.uuid4())
-        chunk_size = 800
-        total = (len(data) + chunk_size - 1) // chunk_size
-
-        for i in range(total):
-            chunk = data[i * chunk_size:(i + 1) * chunk_size]
-
-            chunk_msg = {
-                "chunked": True,
-                "chunk_id": chunk_id,
-                "chunk_idx": i,
-                "num_chunks": total,
-                "payload": chunk
-            }
-
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.sendto(pickle.dumps(chunk_msg), (ip, port))
-            sock.close()
-
-            # Throttle to prevent UDP packet loss
-            time.sleep(0.0005)
-
-    def send(self, ip, port, msg):
-        data = pickle.dumps(msg)
-
-        if self.mode == "tcp":
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect((ip, port))
-            sock.sendall(data)
-            sock.close()
-        else:
-            if len(data) <= MAX_CHUNK_SIZE:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                sock.sendto(data, (ip, port))
+        if mode == "tcp":
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)
+                sock.connect((ip, port))
+                sock.sendall(data)
                 sock.close()
+            except Exception as e:
+                print(f"[TCP Send Error] {e}")
+        else:
+            # UDP path with basic chunking for large gradients
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            if len(data) <= MAX_CHUNK_SIZE:
+                sock.sendto(data, (ip, port))
             else:
-                self._send_chunked(ip, port, msg)
+                chunk_id = str(uuid.uuid4())[:8]
+                chunk_size = 1024
+                total = (len(data) + chunk_size - 1) // chunk_size
+                for i in range(total):
+                    chunk = data[i*chunk_size : (i+1)*chunk_size]
+                    c_msg = {"chunked":True, "cid":chunk_id, "idx":i, "tot":total, "pay":chunk}
+                    sock.sendto(pickle.dumps(c_msg), (ip, port))
+                    time.sleep(0.0001) # Simple rate control
+            sock.close()
 
     def broadcast(self, msg):
-        print(f"[Node {self.node_id}] Broadcasting {msg['type']} ({self.mode})")
         for i, (ip, port) in enumerate(self.peers):
-            if i == self.node_id:
-                continue
-            self.send(ip, port, msg)
-
-    # -------------------------
-    # REGISTRATION & SERVERS
-    # -------------------------
-    def register(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect((COORDINATOR_IP, COORDINATOR_PORT))
-        msg = {"type": "REGISTER", "port": PORT}
-        sock.sendall(pickle.dumps(msg))
-        sock.close()
+            if i != self.node_id:
+                self.send(ip, port, msg, force_mode="tcp")
 
     def start_server(self):
         threading.Thread(target=self.tcp_server, daemon=True).start()
-        if self.mode == "udp":
-            threading.Thread(target=self.udp_server, daemon=True).start()
+        threading.Thread(target=self.udp_server, daemon=True).start()
 
     def tcp_server(self):
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.bind(("0.0.0.0", PORT))
-        server.listen()
-        print("[TCP] Listening...")
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("0.0.0.0", PORT))
+        s.listen(5)
         while True:
-            conn, _ = server.accept()
-            threading.Thread(target=self.handle_conn, args=(conn,), daemon=True).start()
-
-    def handle_conn(self, conn):
-        data = b""
-        while True:
-            chunk = conn.recv(65536)
-            if not chunk: break
-            data += chunk
-        conn.close()
-        try:
-            msg = pickle.loads(data)
-            self.handle_message(msg)
-        except Exception as e:
-            print("[TCP ERROR]", e)
+            conn, _ = s.accept()
+            data = b""
+            while True:
+                packet = conn.recv(65536)
+                if not packet: break
+                data += packet
+            if data:
+                try: self.handle_message(pickle.loads(data))
+                except: pass
+            conn.close()
 
     def udp_server(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind(("0.0.0.0", PORT))
-        print("[UDP] Listening...")
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.bind(("0.0.0.0", PORT))
         while True:
-            data, _ = sock.recvfrom(65536)
+            data, _ = s.recvfrom(65536)
             try:
-                msg = pickle.loads(data)
-                self.handle_message(msg)
-            except Exception as e:
-                print("[UDP ERROR]", e)
+                m = pickle.loads(data)
+                if m.get("chunked"):
+                    cid = m["cid"]
+                    if cid not in self.chunk_buffer: self.chunk_buffer[cid] = {}
+                    self.chunk_buffer[cid][m["idx"]] = m["pay"]
+                    if len(self.chunk_buffer[cid]) == m["tot"]:
+                        full_data = b"".join([self.chunk_buffer[cid][i] for i in range(m["tot"])])
+                        self.handle_message(pickle.loads(full_data))
+                        del self.chunk_buffer[cid]
+                else:
+                    self.handle_message(m)
+            except: pass
 
-    # -------------------------
-    # MESSAGE HANDLER
-    # -------------------------
     def handle_message(self, msg):
-        # ---------- CHUNK HANDLING ----------
-        if msg.get("chunked", False):
-            cid = msg["chunk_id"]
-            if cid not in self.chunk_buffer:
-                self.chunk_buffer[cid] = {"chunks": {}, "total": msg["num_chunks"]}
-
-            self.chunk_buffer[cid]["chunks"][msg["chunk_idx"]] = msg["payload"]
-
-            if len(self.chunk_buffer[cid]["chunks"]) == msg["num_chunks"]:
-                chunks = self.chunk_buffer[cid]["chunks"]
-                try:
-                    data = b"".join(chunks[i] for i in range(msg["num_chunks"]))
-                    msg = pickle.loads(data)
-                    del self.chunk_buffer[cid]
-                except KeyError:
-                    print("[CHUNK ERROR] Missing chunk")
-                    return
-            else:
-                return 
-
-        # ---------- LOGIC ----------
         t = msg.get("type")
         if t == "PEER_UPDATE":
             self.peers = msg["peers"]
             self.node_id = msg["node_id"]
             self.num_nodes = len(self.peers)
-            print(f"[Node {self.node_id}] Peers updated")
-            return
-
-        if t == "START":
-            print(f"[Node {self.node_id}] Received START")
+        elif t == "START":
             threading.Thread(target=self.run_experiment, args=(msg,), daemon=True).start()
-            return
-
-        if t == "DONE":
-            if self.node_id == 0:
-                with self.lock:
-                    self.done_count += 1
-            return
-
-        # Route to the correct algorithm buffer
-        algo = msg.get("algo")
-        if algo == "ps":
-            self.handle_ps(msg)
-        elif algo == "ring":
-            with self.lock:
-                self.ring_buffer.append(msg)
-        elif algo == "optireduce":
-            with self.lock:
-                self.opti_buffer.append(msg)
-
-    def handle_ps(self, msg):
-        phase = msg.get("phase")
-        if phase == "push":
-            data = msg["payload"]
-            with self.lock:
-                self.received.append(data)
-            print(f"[PS] Node {self.node_id} received PUSH "
-                f"({len(self.received)}/{self.num_nodes})")
-        elif phase == "result":
-            print(f"[Node {self.node_id}] Received FINAL RESULT")
+        elif t == "DONE":
+            with self.lock: self.done_count += 1
+        elif t == "NOISE":
+            action = msg["action"]
+            if action == "straggler":
+                self.noise.enable_straggler = msg["enable"]
+                self.noise.sleep_time = float(msg["val"])
+                print(f"[Node {self.node_id}] Straggler Noise: {msg['enable']} ({msg['val']}s)")
+                
+            elif action == "loss":
+                if msg["enable"]:
+                    # Applies to the whole OS network stack
+                    self.noise.apply_packet_loss_tc(msg["val"])
+                else:
+                    self.noise.clear_tc()
+        elif msg.get("algo") == "ring":
+            with self.lock: self.ring_buffer.append(msg)
+        elif msg.get("algo") == "optireduce":
+            with self.lock: self.opti_buffer.append(msg)
+        elif msg.get("algo") == "ps":
+            if msg.get("phase") == "push":
+                with self.lock: self.received.append(msg["payload"])
 
     def run_experiment(self, msg):
         self.algo = msg["algo"]
         size = msg["size"]
-        print(f"[Node {self.node_id}] START {self.algo}, size={size}")
-
-        self.local_matrix = generate_matrix(size).astype(np.float32)
-        print(f"[Node {self.node_id}] Computing gradient...")
+        self.local_matrix = generate_matrix(size)
         gradient = np.tanh(self.local_matrix)
-
-        time.sleep(1) 
+        
+        # Apply straggler variability
+        self.noise.apply_straggler()
 
         if self.node_id == 0:
             self.done_count = 0
             self.start_time = time.perf_counter()
 
-        # ---------- EXECUTE ALGORITHM ----------
-        if self.algo == "ps":
-            result = run_ps(self, gradient)
-        elif self.algo == "ring":
-            result = run_ring(self, gradient)
-        elif self.algo == "optireduce":
-            result = run_optireduce(self, gradient)
-        else:
-            print(f"[ERROR] Unknown algorithm: {self.algo}")
-            return
-        
-        # ---------- SYNCHRONIZATION ----------
-        if self.node_id != 0:
-            ip, port = self.peers[0]
-            self.send(ip, port, {"type": "DONE"})
-            print(f"[Node {self.node_id}] Finished {self.algo}. Sent DONE to Node 0.")
-        else:
-            with self.lock:
-                self.done_count += 1
-            while True:
-                with self.lock:
-                    if self.done_count == self.num_nodes:
-                        break
-                time.sleep(0.001)
+        # Dispatch
+        if self.algo == "ps": result = run_ps(self, gradient)
+        elif self.algo == "ring": result = run_ring(self, gradient)
+        elif self.algo == "optireduce": result = run_optireduce(self, gradient)
 
-            latency = (time.perf_counter() - self.start_time) * 1000
-            print(f"\n[FINAL] {self.algo} latency = {latency:.2f} ms\n")
+        # Sync Finish
+        if self.node_id != 0:
+            self.send(self.peers[0][0], self.peers[0][1], {"type": "DONE"}, force_mode="tcp")
+        else:
+            with self.lock: self.done_count += 1
+            while self.done_count < self.num_nodes: time.sleep(0.01)
+            print(f"\n[RESULT] {self.algo} Latency: {(time.perf_counter()-self.start_time)*1000:.2f} ms\n>> ", end="")
+
+    def register(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((COORDINATOR_IP, COORDINATOR_PORT))
+        s.sendall(pickle.dumps({"type": "REGISTER", "port": PORT}))
+        s.close()
 
     def cli(self):
         while True:
             cmd = input(">> ").strip().split()
             if not cmd: continue
             if cmd[0] == "start":
-                algo, size = cmd[1], int(cmd[2])
-                msg = {"type": "START", "algo": algo, "size": size}
+                self.broadcast({"type": "START", "algo": cmd[1], "size": int(cmd[2])})
+                self.run_experiment({"type": "START", "algo": cmd[1], "size": int(cmd[2])})
+            elif cmd[0] == "noise":
+                enable = cmd[2] != "0"
+                msg = {"type":"NOISE", "action":cmd[1], "enable":enable, "val":cmd[2]}
                 self.broadcast(msg)
-                self.run_experiment(msg)
+                self.handle_message(msg)
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["tcp", "udp"], required=True)
-    args = parser.parse_args()
-
-    node = Node(args.mode)
-    node.start_server()
-    print("type 'register'")
-    input("> ")
-    node.register()
-    time.sleep(2)
-    node.cli()
+    p = argparse.ArgumentParser()
+    p.add_argument("--mode", choices=["tcp", "udp"], default="tcp")
+    a = p.parse_args()
+    n = Node(a.mode)
+    n.start_server()
+    print("Type 'reg' to register")
+    if input("> ") == "reg": n.register()
+    n.cli()

@@ -1,19 +1,13 @@
 import time
 import random
 import subprocess
-import threading
 
 class Noise:
     def __init__(self):
         self.enable_straggler = False
         self.enable_udp_loss = False
-        self.enable_tcp_loss = False
-        self.enable_cpu_stress = False
-
+        self.udp_loss_rate = 0.05
         self.sleep_time = 0.0
-        self.udp_loss_rate = 0.0
-        self.tcp_loss_rate = "0%"
-        self.cpu_cores = 0
 
     def apply_straggler(self):
         if self.enable_straggler:
@@ -21,20 +15,14 @@ class Noise:
             time.sleep(self.sleep_time)
 
     def should_drop_udp(self):
-        if not self.enable_udp_loss:
-            return False
-        if random.random() < self.udp_loss_rate:
-            print("[NOISE][UDP] Packet dropped (Simulated)")
-            return True
-        return False
+        if not self.enable_udp_loss: return False
+        return random.random() < self.udp_loss_rate
 
     def apply_packet_loss_tc(self, loss="5%"):
-        print(f"[NOISE] Applying kernel-level loss: {loss}")
+        print(f"[NOISE] Applying system-level loss: {loss}")
         subprocess.call(["sudo", "tc", "qdisc", "del", "dev", "eth0", "root"], stderr=subprocess.DEVNULL)
         subprocess.call(["sudo", "tc", "qdisc", "add", "dev", "eth0", "root", "netem", "loss", loss])
-        self.enable_tcp_loss = True
 
     def clear_tc(self):
-        print("[NOISE] Clearing kernel-level loss")
+        print("[NOISE] Clearing system-level loss")
         subprocess.call(["sudo", "tc", "qdisc", "del", "dev", "eth0", "root"], stderr=subprocess.DEVNULL)
-        self.enable_tcp_loss = False

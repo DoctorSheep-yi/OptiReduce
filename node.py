@@ -15,6 +15,30 @@ COORDINATOR_PORT = 8000
 PORT = 9000
 
 
+import uuid
+
+MAX_CHUNK_SIZE = 60000  # safe UDP payload
+
+
+def send_large(node, ip, port, base_msg, obj):
+    data = pickle.dumps(obj)
+
+    chunk_id = str(uuid.uuid4())
+    total = (len(data) + MAX_CHUNK_SIZE - 1) // MAX_CHUNK_SIZE
+
+    for i in range(total):
+        chunk = data[i * MAX_CHUNK_SIZE:(i + 1) * MAX_CHUNK_SIZE]
+
+        msg = base_msg.copy()
+        msg.update({
+            "chunk_id": chunk_id,
+            "chunk_idx": i,
+            "num_chunks": total,
+            "payload": chunk
+        })
+
+        node.send(ip, port, msg)
+
 class Node:
     def __init__(self, mode):
         self.mode = mode
@@ -34,6 +58,7 @@ class Node:
         self.ring_buffer = []
         self.opti_buffer = []
         self.received = []
+        self.chunk_buffer = {}
 
     # -------------------------
     # NETWORK SEND
@@ -130,13 +155,38 @@ class Node:
     def handle_message(self, msg):
         t = msg.get("type")
 
+        # ---------- CHUNK REASSEMBLY ----------
+        if "chunk_id" in msg:
+            cid = msg["chunk_id"]
+
+            if cid not in self.chunk_buffer:
+                self.chunk_buffer[cid] = {
+                    "chunks": {},
+                    "total": msg["num_chunks"]
+                }
+
+            self.chunk_buffer[cid]["chunks"][msg["chunk_idx"]] = msg["payload"]
+
+            if len(self.chunk_buffer[cid]["chunks"]) == msg["num_chunks"]:
+                data = b"".join(
+                    self.chunk_buffer[cid]["chunks"][i]
+                    for i in range(msg["num_chunks"])
+                )
+
+                full_payload = pickle.loads(data)
+
+                # restore original message
+                msg["payload"] = full_payload
+                del self.chunk_buffer[cid]
+            else:
+                return
+
         # ---------- coordinator ----------
         if t == "PEER_UPDATE":
             self.peers = msg["peers"]
             self.node_id = msg["node_id"]
             self.num_nodes = len(self.peers)
-
-            print(f"[Node {self.node_id}] Peers updated: {self.peers}")
+            print(f"[Node {self.node_id}] Peers updated")
             return
 
         # ---------- START ----------
@@ -152,12 +202,11 @@ class Node:
                     self.done_count += 1
             return
 
-        # ---------- ALGORITHM ----------
+        # ---------- ALGO ----------
         algo = msg.get("algo")
 
         if algo == "ring":
-            shard = np.array(msg["payload"])
-            self.ring_buffer.append(shard)
+            self.ring_buffer.append(np.array(msg["payload"]))
             return
 
         if algo == "optireduce":

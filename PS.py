@@ -1,6 +1,6 @@
 import numpy as np
 import time
-
+from node import send_large
 
 def run_ps(node, grad):
     if node.node_id == 0:
@@ -27,7 +27,10 @@ def run_ps(node, grad):
             "payload": result.tolist()
         }
 
-        node.broadcast(msg)
+        for i, (ip, port) in enumerate(node.peers):
+            if i == node.node_id:
+                continue
+            send_large(node, ip, port, msg, result)
         return result
 
     else:
@@ -42,5 +45,7 @@ def run_ps(node, grad):
             "payload": grad.tolist()
         }
 
-        node.send(ip, port, msg)
+        #node.send(ip, port, msg)
+
+        send_large(node, ip, port, msg, grad)
         return None

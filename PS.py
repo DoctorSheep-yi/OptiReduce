@@ -1,38 +1,37 @@
-# PS.py
 import numpy as np
+import time
 
-def sum(matrices):
-    if not matrices:
-        raise ValueError("No matrices provided")
 
-    # check shape consistency
-    first_shape = matrices[0].shape
-    for m in matrices:
-        if m.shape != first_shape:
-            raise ValueError("All matrices must have the same shape for sum")
+def run_ps(node, grad):
+    if node.node_id == 0:
+        collected = [grad]
 
-    result = np.zeros_like(matrices[0])
+        while len(collected) < node.num_nodes:
+            time.sleep(0.001)
 
-    for m in matrices:
-        result = result + m
+        result = np.zeros_like(grad)
+        for g in collected:
+            result += g
 
-    return result
+        msg = {
+            "type": "DATA",
+            "algo": "ps",
+            "phase": "result",
+            "payload": result.tolist()
+        }
 
-def multiply(matrices):
-    if not matrices:
-        raise ValueError("No matrices provided")
+        node.broadcast(msg)
+        return result
 
-    result = matrices[0]
+    else:
+        ip, port = node.peers[0]
 
-    for i in range(1, len(matrices)):
-        m = matrices[i]
+        msg = {
+            "type": "DATA",
+            "algo": "ps",
+            "phase": "push",
+            "payload": grad.tolist()
+        }
 
-        # shape check: (n x k) @ (k x m)
-        if result.shape[1] != m.shape[0]:
-            raise ValueError(
-                f"Incompatible shapes: {result.shape} and {m.shape}"
-            )
-
-        result = result @ m
-
-    return result
+        node.send(ip, port, msg)
+        return None

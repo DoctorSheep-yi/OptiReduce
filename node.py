@@ -6,20 +6,45 @@ import numpy as np
 
 from matrix import generate_matrix
 
+from ps import run_ps
+from ring import run_ring
+from optireduce import run_optireduce
+
 COORDINATOR_IP = "172.21.102.115"
 COORDINATOR_PORT = 8000
 PORT = 9000
 
 
 class Node:
-    def __init__(self):
+    def __init__(self, mode):
+        self.mode = mode  # tcp | udp
         self.peers = []
         self.node_id = None
         self.num_nodes = None
 
         self.local_matrix = None
-        self.received = []
-        self.lock = threading.Lock()
+
+    # -------------------------
+    # NETWORK
+    # -------------------------
+    def send(self, ip, port, msg):
+        data = pickle.dumps(msg)
+
+        if self.mode == "tcp":
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.connect((ip, port))
+            sock.sendall(data)
+            sock.close()
+        else:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.sendto(data, (ip, port))
+            sock.close()
+
+    def broadcast(self, msg):
+        for i, (ip, port) in enumerate(self.peers):
+            if i == self.node_id:
+                continue
+            self.send(ip, port, msg)
 
     # -------------------------
     # REGISTER
@@ -41,19 +66,22 @@ class Node:
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.bind(("0.0.0.0", PORT))
         server.listen()
-        print("[TCP] Listening...")
+
+        print("[Node] Listening...")
 
         while True:
             conn, _ = server.accept()
             threading.Thread(target=self.handle_conn, args=(conn,), daemon=True).start()
 
     def handle_conn(self, conn):
-        data = b''
+        data = b""
         while True:
-            packet = conn.recv(65536)
-            if not packet:
+            chunk = conn.recv(65536)
+            if not chunk:
                 break
-            data += packet
+            data += chunk
+
+        conn.close()
 
         try:
             msg = pickle.loads(data)
@@ -61,179 +89,103 @@ class Node:
         except Exception as e:
             print("[ERROR]", e)
 
-        conn.close()
-
     # -------------------------
     # MESSAGE HANDLER
     # -------------------------
     def handle_message(self, msg):
-        msg_type = msg.get("type")
+        t = msg.get("type")
 
-        if msg_type == "PEER_UPDATE":
+        if t == "PEER_UPDATE":
             self.peers = msg["peers"]
             self.node_id = msg["node_id"]
             self.num_nodes = len(self.peers)
 
-            print(f"\n[Node {self.node_id}] Peers updated")
-
-        elif msg_type == "START":
-            threading.Thread(target=self.run_ps, args=(msg,), daemon=True).start()
-
-        elif msg_type == "PUSH":
-            self.handle_push(msg)
-
-        elif msg_type == "RESULT":
-            self.handle_result(msg)
-
-    # -------------------------
-    # SEND HELPERS
-    # -------------------------
-    def send(self, ip, port, msg):
-        payload = pickle.dumps(msg)
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect((ip, port))
-        sock.sendall(payload)
-        sock.close()
-
-    def broadcast(self, msg):
-        for i, (ip, port) in enumerate(self.peers):
-            if i == self.node_id:
-                continue
-            self.send(ip, port, msg)
-
-    # -------------------------
-    # PS EXECUTION
-    # -------------------------
-    def run_ps(self, msg):
-        size = msg["size"]
-
-        print(f"[Node {self.node_id}] Start round with size={size}")
-
-        # -------------------------
-        # GENERATE (NOT TIMED)
-        # -------------------------
-        try:
-            self.local_matrix = generate_matrix(size)
-        except Exception as e:
-            print(f"[Node {self.node_id}] ERROR:", e)
+            print(f"[Node {self.node_id}] Peers updated")
             return
 
-        # -------------------------
-        # START TIMING (ALGO ONLY)
-        # -------------------------
-        start_time = time.perf_counter()
+        if t == "START":
+            threading.Thread(target=self.run_experiment, args=(msg,), daemon=True).start()
+            return
 
-        if self.node_id == 0:
-            # server
-            with self.lock:
-                self.received = [self.local_matrix]
+        # algorithm messages forwarded
+        if self.algo_handler:
+            self.algo_handler(msg)
 
-            # wait all workers
-            while True:
-                with self.lock:
-                    if len(self.received) == self.num_nodes:
-                        break
-                time.sleep(0.001)
+    # -------------------------
+    # EXPERIMENT
+    # -------------------------
+    def run_experiment(self, msg):
+        algo = msg["algo"]
+        size = msg["size"]
 
-            # aggregate (SUM)
-            result = np.zeros_like(self.local_matrix)
-            for m in self.received:
-                result += m
+        print(f"[Node {self.node_id}] START {algo}, size={size}")
 
-            latency = (time.perf_counter() - start_time) * 1000
+        # ---------- NOT TIMED ----------
+        self.local_matrix = generate_matrix(size).astype(np.float32)
+        gradient = np.tanh(self.local_matrix)
+        # --------------------------------
 
-            print(f"[Server] Done. Latency={latency:.2f} ms")
+        # barrier (simple)
+        time.sleep(1)
 
-            # broadcast result
-            msg = {
-                "type": "RESULT",
-                "data": result.tolist(),
-                "latency": latency
-            }
-            self.broadcast(msg)
+        start = time.perf_counter()
 
-            # also print locally
-            self.handle_result(msg)
+        if algo == "ps":
+            result = run_ps(self, gradient)
+
+        elif algo == "ring":
+            result = run_ring(self, gradient)
+
+        elif algo == "optireduce":
+            result = run_optireduce(self, gradient)
 
         else:
-            # worker → send to server
-            ip, port = self.peers[0]
+            raise ValueError("Unknown algo")
 
-            msg = {
-                "type": "PUSH",
-                "data": self.local_matrix.tolist(),
-                "from": self.node_id
-            }
+        latency = (time.perf_counter() - start) * 1000
 
-            self.send(ip, port, msg)
+        print(f"[Node {self.node_id}] DONE {algo} latency={latency:.2f} ms")
 
     # -------------------------
-    # HANDLE PUSH
+    # CLI (ONLY NODE 0)
     # -------------------------
-    def handle_push(self, msg):
-        data = np.array(msg["data"])
-
-        with self.lock:
-            self.received.append(data)
-
-    # -------------------------
-    # HANDLE RESULT
-    # -------------------------
-    def handle_result(self, msg):
-        latency = msg["latency"]
-        print(f"[Node {self.node_id}] RESULT received. Latency={latency:.2f} ms")
-
-    # -------------------------
-    # CLI (ONLY SERVER USES)
-    # -------------------------
-    def cli_loop(self):
+    def cli(self):
         while True:
-            cmd = input(">> ").strip()
+            cmd = input(">> ").strip().split()
 
-            if cmd.startswith("start"):
-                if self.node_id != 0:
-                    print("Only node 0 can start!")
-                    continue
+            if not cmd:
+                continue
 
-                try:
-                    size = int(cmd.split()[1])
-                except:
-                    print("Usage: start <size>")
-                    continue
+            if cmd[0] == "start":
+                # start <algo> <size>
+                algo = cmd[1]
+                size = int(cmd[2])
 
                 msg = {
                     "type": "START",
+                    "algo": algo,
                     "size": size
                 }
 
-                print(f"[Server] Broadcasting size={size}")
                 self.broadcast(msg)
-
-                # also run locally
-                self.run_ps(msg)
+                self.run_experiment(msg)
 
 
-# -------------------------
-# MAIN
-# -------------------------
 if __name__ == "__main__":
-    node = Node()
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["tcp", "udp"], required=True)
+    args = parser.parse_args()
+
+    node = Node(args.mode)
     node.start_server()
 
-    time.sleep(1)
+    print("type 'register'")
+    input("> ")
     node.register()
 
-    print("Node started. Waiting for peers...")
+    time.sleep(2)
 
-    # wait for peer update
-    while node.node_id is None:
-        time.sleep(1)
-
-    print(f"[Node {node.node_id}] Ready")
-
-    # only server has CLI
-    if node.node_id == 0:
-        node.cli_loop()
-    else:
-        while True:
-            time.sleep(10)
+    if True:
+        node.cli()

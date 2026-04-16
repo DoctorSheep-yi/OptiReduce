@@ -1,10 +1,36 @@
 import numpy as np
 import time
+import pickle
 import uuid
 
-MAX_CHUNK_SIZE = 60000  # safe UDP payload
+from globals  import *
 
 
+# -------------------------
+# AUTO SEND (FAST + CHUNKED)
+# -------------------------
+def send_auto(node, ip, port, base_msg, obj):
+    data = pickle.dumps(obj)
+
+    if len(data) <= MAX_CHUNK_SIZE:
+        # -------- FAST PATH --------
+        msg = base_msg.copy()
+        msg.update({
+            "chunked": False,
+            "payload": obj
+        })
+        print(f"[SEND] Direct ({len(data)} bytes)")
+        node.send(ip, port, msg)
+
+    else:
+        # -------- SLOW PATH --------
+        print(f"[SEND] Chunking ({len(data)} bytes)")
+        send_large(node, ip, port, base_msg, obj)
+
+
+# -------------------------
+# CHUNKED SEND
+# -------------------------
 def send_large(node, ip, port, base_msg, obj):
     data = pickle.dumps(obj)
 
@@ -16,19 +42,25 @@ def send_large(node, ip, port, base_msg, obj):
 
         msg = base_msg.copy()
         msg.update({
+            "chunked": True,
             "chunk_id": chunk_id,
             "chunk_idx": i,
             "num_chunks": total,
             "payload": chunk
         })
 
+        print(f"[PS] Sending chunk {i+1}/{total}")
         node.send(ip, port, msg)
-        
+        time.sleep(0.0005)
+
+
+# -------------------------
+# PARAMETER SERVER
+# -------------------------
 def run_ps(node, grad):
     if node.node_id == 0:
         print("[PS] Node 0 acting as server")
 
-        # SAME variable as original node.py
         node.received = [grad]
 
         while True:
@@ -45,14 +77,14 @@ def run_ps(node, grad):
         msg = {
             "type": "DATA",
             "algo": "ps",
-            "phase": "result",
-            "payload": result.tolist()
+            "phase": "result"
         }
 
         for i, (ip, port) in enumerate(node.peers):
             if i == node.node_id:
                 continue
-            send_large(node, ip, port, msg, result)
+            send_auto(node, ip, port, msg, result)
+
         return result
 
     else:
@@ -63,11 +95,8 @@ def run_ps(node, grad):
         msg = {
             "type": "DATA",
             "algo": "ps",
-            "phase": "push",
-            "payload": grad.tolist()
+            "phase": "push"
         }
 
-        #node.send(ip, port, msg)
-
-        send_large(node, ip, port, msg, grad)
+        send_auto(node, ip, port, msg, grad)
         return None

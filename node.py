@@ -10,6 +10,8 @@ from PS import run_ps
 from ring_allreduce import run_ring
 from optireduce import run_optireduce
 
+from globals import *
+
 COORDINATOR_IP = "172.21.102.115"
 COORDINATOR_PORT = 8000
 PORT = 9000
@@ -38,6 +40,31 @@ class Node:
     # -------------------------
     # NETWORK SEND
     # -------------------------
+    def _send_chunked(self, ip, port, msg):
+        data = pickle.dumps(msg)
+
+        chunk_id = str(uuid.uuid4())
+        chunk_size = 800
+
+        total = (len(data) + chunk_size - 1) // chunk_size
+
+        for i in range(total):
+            chunk = data[i * chunk_size:(i + 1) * chunk_size]
+
+            chunk_msg = {
+                "chunked": True,
+                "chunk_id": chunk_id,
+                "chunk_idx": i,
+                "num_chunks": total,
+                "payload": chunk
+            }
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.sendto(pickle.dumps(chunk_msg), (ip, port))
+            sock.close()
+
+            time.sleep(0.0005)
+
     def send(self, ip, port, msg):
         data = pickle.dumps(msg)
 
@@ -46,17 +73,21 @@ class Node:
             sock.connect((ip, port))
             sock.sendall(data)
             sock.close()
-        else:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.sendto(data, (ip, port))
-            sock.close()
 
-    def broadcast(self, msg):
-        print(f"[Node {self.node_id}] Broadcasting {msg['type']} ({self.mode})")
-        for i, (ip, port) in enumerate(self.peers):
-            if i == self.node_id:
-                continue
-            self.send(ip, port, msg)
+        else:
+            if len(data) <= MAX_CHUNK_SIZE:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.sendto(data, (ip, port))
+                sock.close()
+            else:
+                self._send_chunked(ip, port, msg)
+
+        def broadcast(self, msg):
+            print(f"[Node {self.node_id}] Broadcasting {msg['type']} ({self.mode})")
+            for i, (ip, port) in enumerate(self.peers):
+                if i == self.node_id:
+                    continue
+                self.send(ip, port, msg)
 
     # -------------------------
     # REGISTER
@@ -130,8 +161,9 @@ class Node:
     def handle_message(self, msg):
         t = msg.get("type")
 
-        # ---------- CHUNK REASSEMBLY ----------
-        if "chunk_id" in msg:
+        # ---------- CHUNK HANDLING ----------
+        if msg.get("chunked", False):
+
             cid = msg["chunk_id"]
 
             if cid not in self.chunk_buffer:
@@ -143,18 +175,22 @@ class Node:
             self.chunk_buffer[cid]["chunks"][msg["chunk_idx"]] = msg["payload"]
 
             if len(self.chunk_buffer[cid]["chunks"]) == msg["num_chunks"]:
-                data = b"".join(
-                    self.chunk_buffer[cid]["chunks"][i]
-                    for i in range(msg["num_chunks"])
-                )
+                chunks = self.chunk_buffer[cid]["chunks"]
+
+                try:
+                    data = b"".join(chunks[i] for i in range(msg["num_chunks"]))
+                except KeyError:
+                    print("[CHUNK ERROR] Missing chunk")
+                    return
 
                 full_payload = pickle.loads(data)
 
-                # restore original message
                 msg["payload"] = full_payload
+                msg["chunked"] = False  # now it's normal
                 del self.chunk_buffer[cid]
+
             else:
-                return
+                return  # wait for more chunks
 
         # ---------- coordinator ----------
         if t == "PEER_UPDATE":
@@ -199,13 +235,13 @@ class Node:
         phase = msg.get("phase")
 
         if phase == "push":
-            data = np.array(msg["payload"])
+            data = msg["payload"]   # ✅ IMPORTANT FIX (no np.array)
 
             with self.lock:
                 self.received.append(data)
 
             print(f"[PS] Node {self.node_id} received PUSH "
-                  f"({len(self.received)}/{self.num_nodes})")
+                f"({len(self.received)}/{self.num_nodes})")
 
         elif phase == "result":
             print(f"[Node {self.node_id}] Received FINAL RESULT")

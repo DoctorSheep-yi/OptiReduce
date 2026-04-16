@@ -1,31 +1,30 @@
 import socket
-import argparse
 import threading
 import pickle
+import time
 import uuid
-import sys
 import numpy as np
-from matrix import generate_matrix
+
+from matrix import generate_matrix, init_matrix
 import PS
+from noise import Noise
 
 COORDINATOR_IP = "172.21.102.115"
 COORDINATOR_PORT = 8000
 PORT = 9000
 
-UDP_SAFE = 1200
-CHUNK_SIZE = 1000
-
 
 class Node:
-    def __init__(self, mode):
-        self.mode = mode
+    def __init__(self):
         self.peers = []
         self.node_id = None
         self.num_nodes = None
 
-        self.received_matrices = []
-        self.chunk_buffer = {}
-        self.final_result = None
+        self.local_matrix = None
+        self.received = []
+        self.lock = threading.Lock()
+
+        self.noise = Noise()
 
     # -------------------------
     # REGISTER
@@ -37,24 +36,11 @@ class Node:
         sock.sendall(pickle.dumps(msg))
         sock.close()
 
-    def unregister(self):
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect((COORDINATOR_IP, COORDINATOR_PORT))
-            msg = {"type": "UNREGISTER", "port": PORT}
-            sock.sendall(pickle.dumps(msg))
-            sock.close()
-            print("[Node] Unregistered")
-        except Exception as e:
-            print("[Node] Unregister failed:", e)
-
     # -------------------------
     # SERVER
     # -------------------------
     def start_server(self):
         threading.Thread(target=self.tcp_server, daemon=True).start()
-        if self.mode == "udp":
-            threading.Thread(target=self.udp_server, daemon=True).start()
 
     def tcp_server(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -64,42 +50,28 @@ class Node:
 
         while True:
             conn, _ = server.accept()
-            threading.Thread(target=self.handle_tcp, args=(conn,), daemon=True).start()
+            threading.Thread(target=self.handle_conn, args=(conn,), daemon=True).start()
 
-    def handle_tcp(self, conn):
-        try:
-            data = b''
-            while True:
-                packet = conn.recv(4096)
-                if not packet:
-                    break
-                data += packet
-
-            msg = pickle.loads(data)
-            self.process_message(msg)
-
-        except Exception as e:
-            print("[TCP ERROR]", e)
-        finally:
-            conn.close()
-
-    def udp_server(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind(("0.0.0.0", PORT))
-        print("[UDP] Listening...")
-
+    def handle_conn(self, conn):
+        data = b''
         while True:
-            try:
-                data, _ = sock.recvfrom(65535)
-                msg = pickle.loads(data)
-                self.process_message(msg)
-            except Exception as e:
-                print("[UDP ERROR]", e)
+            packet = conn.recv(65536)
+            if not packet:
+                break
+            data += packet
+
+        try:
+            msg = pickle.loads(data)
+            self.handle_message(msg)
+        except Exception as e:
+            print("[ERROR]", e)
+
+        conn.close()
 
     # -------------------------
     # MESSAGE HANDLER
     # -------------------------
-    def process_message(self, msg):
+    def handle_message(self, msg):
         msg_type = msg.get("type")
 
         if msg_type == "PEER_UPDATE":
@@ -107,212 +79,178 @@ class Node:
             self.node_id = msg["node_id"]
             self.num_nodes = len(self.peers)
 
-            print(f"\n[Node] Peers: {self.peers}")
-            print(f"My ID: {self.node_id}\n")
+            print(f"[Node {self.node_id}] Peers: {self.peers}")
 
-        elif msg_type == "DATA":
-            data = np.array(msg["data"])
+        elif msg_type == "RUN":
+            threading.Thread(target=self.run_ps, args=(msg,), daemon=True).start()
 
-            print(f"[RECV] FULL from Node {msg['from']}")
-            self.received_matrices.append(data)
-            print(f"[STORE] total={len(self.received_matrices)}")
-
-        elif msg_type == "DATA_CHUNK":
-            self.handle_chunk(msg)
+        elif msg_type == "PUSH":
+            self.handle_push(msg)
 
         elif msg_type == "RESULT":
-            self.final_result = np.array(msg["data"])
-            print("[RESULT RECEIVED] (use 'show result')")
+            self.handle_result(msg)
 
-        elif msg_type == "RESULT_CHUNK":
-            self.handle_result_chunk(msg)
-
-    # -------------------------
-    # CHUNK HANDLING (DATA)
-    # -------------------------
-    def handle_chunk(self, msg):
-        msg_id = msg["msg_id"]
-        seq = msg["seq"]
-        total = msg["total"]
-        chunk = msg["data"]
-
-        if msg_id not in self.chunk_buffer:
-            self.chunk_buffer[msg_id] = [None] * total
-
-        self.chunk_buffer[msg_id][seq] = chunk
-
-        if all(c is not None for c in self.chunk_buffer[msg_id]):
-            full_payload = b''.join(self.chunk_buffer[msg_id])
-            full_msg = pickle.loads(full_payload)
-
-            data = np.array(full_msg["data"])
-
-            self.received_matrices.append(data)
-
-            print(f"[RECV] Matrix reconstructed")
-            print(f"[STORE] total={len(self.received_matrices)}")
-
-            del self.chunk_buffer[msg_id]
+        elif msg_type == "METRIC":
+            # only node 0 collects
+            if self.node_id == 0:
+                self.collect_metric(msg)
 
     # -------------------------
-    # CHUNK HANDLING (RESULT)
+    # SEND
     # -------------------------
-    def handle_result_chunk(self, msg):
-        msg_id = msg["msg_id"]
-        seq = msg["seq"]
-        total = msg["total"]
-        chunk = msg["data"]
-
-        if msg_id not in self.chunk_buffer:
-            self.chunk_buffer[msg_id] = [None] * total
-
-        self.chunk_buffer[msg_id][seq] = chunk
-
-        if all(c is not None for c in self.chunk_buffer[msg_id]):
-            full_payload = b''.join(self.chunk_buffer[msg_id])
-            full_msg = pickle.loads(full_payload)
-
-            self.final_result = np.array(full_msg["data"])
-
-            print("[RESULT STORED] (use 'show result')")
-
-            del self.chunk_buffer[msg_id]
-
-    # -------------------------
-    # SEND HELPERS
-    # -------------------------
-    def _send_payload(self, ip, port, payload):
-        if self.mode == "tcp":
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect((ip, port))
-            sock.sendall(payload)
-            sock.close()
-        else:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.sendto(payload, (ip, port))
-
-    def _send_large(self, ip, port, msg, chunk_type):
+    def send(self, ip, port, msg):
         payload = pickle.dumps(msg)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((ip, port))
+        sock.sendall(payload)
+        sock.close()
 
-        if len(payload) <= UDP_SAFE:
-            self._send_payload(ip, port, payload)
+    def broadcast(self, msg):
+        for i, (ip, port) in enumerate(self.peers):
+            if i == self.node_id:
+                continue
+            self.send(ip, port, msg)
+
+    # -------------------------
+    # PS WORKFLOW
+    # -------------------------
+    def run_ps(self, config):
+        if config["algo"] != "PS":
             return
 
-        msg_id = str(uuid.uuid4())
-        total = (len(payload) + CHUNK_SIZE - 1) // CHUNK_SIZE
+        size = config["matrix_size"]
+        op = config["operation"]
+        round_id = config["round_id"]
 
-        for i in range(total):
-            chunk = payload[i * CHUNK_SIZE:(i + 1) * CHUNK_SIZE]
+        print(f"\n[Node {self.node_id}] RUN PS round {round_id}")
 
-            chunk_msg = {
-                "type": chunk_type,
-                "msg_id": msg_id,
-                "seq": i,
-                "total": total,
-                "data": chunk
+        # -------------------------
+        # 1. GENERATE (NOT TIMED)
+        # -------------------------
+        t0 = time.perf_counter()
+        self.local_matrix = generate_matrix(size).astype(float)
+        t1 = time.perf_counter()
+
+        gen_time = (t1 - t0) * 1000
+
+        # -------------------------
+        # 2. NOISE (optional, not timed)
+        # -------------------------
+        self.noise.apply_straggler()
+
+        # -------------------------
+        # 3. START TIMING (ONLY ALGO)
+        # -------------------------
+        start_time = time.perf_counter()
+
+        # -------------------------
+        # PARAMETER SERVER LOGIC
+        # -------------------------
+        if self.node_id == 0:
+            with self.lock:
+                self.received = [self.local_matrix]
+
+            # wait for all nodes
+            while True:
+                with self.lock:
+                    if len(self.received) == self.num_nodes:
+                        break
+                time.sleep(0.001)
+
+            # compute
+            if op == "sum":
+                result = PS.sum(self.received)
+            else:
+                result = PS.multiply(self.received)
+
+            algo_time = (time.perf_counter() - start_time) * 1000
+
+            print(f"[Node 0] GEN={gen_time:.2f} ms | ALGO={algo_time:.2f} ms")
+
+            # broadcast result
+            msg = {
+                "type": "RESULT",
+                "data": result.tolist(),
+                "round_id": round_id,
+                "algo_time": algo_time,
+                "gen_time": gen_time
+            }
+            self.broadcast(msg)
+
+            # handle locally
+            self.handle_result(msg)
+
+        else:
+            # send to node 0
+            ip, port = self.peers[0]
+
+            msg = {
+                "type": "PUSH",
+                "data": self.local_matrix.tolist(),
+                "from": self.node_id,
+                "round_id": round_id
             }
 
-            self._send_payload(ip, port, pickle.dumps(chunk_msg))
+            self.send(ip, port, msg)
 
     # -------------------------
-    # SEND MATRIX
+    # HANDLE PUSH
     # -------------------------
-    def send_matrix(self, target_id, data):
-        ip, port = self.peers[target_id]
+    def handle_push(self, msg):
+        data = np.array(msg["data"])
 
-        msg = {
-            "type": "DATA",
-            "from": self.node_id,
-            "data": data.tolist()
+        with self.lock:
+            self.received.append(data)
+
+    # -------------------------
+    # HANDLE RESULT
+    # -------------------------
+    def handle_result(self, msg):
+        result = np.array(msg["data"])
+        algo_time = msg["algo_time"]
+        gen_time = msg["gen_time"]
+        round_id = msg["round_id"]
+
+        print(f"[Node {self.node_id}] RESULT received (round {round_id})")
+
+        metric = {
+            "type": "METRIC",
+            "node_id": self.node_id,
+            "algo_time": algo_time,
+            "gen_time": gen_time,
+            "round_id": round_id
         }
 
-        print(f"[SEND] → Node {target_id}")
-        self._send_large(ip, port, msg, "DATA_CHUNK")
+        if self.node_id != 0:
+            ip, port = self.peers[0]
+            self.send(ip, port, metric)
+        else:
+            self.collect_metric(metric)
 
     # -------------------------
-    # BROADCAST RESULT
+    # METRIC COLLECTION
     # -------------------------
-    def broadcast_result(self, result):
-        msg = {
-            "type": "RESULT",
-            "from": self.node_id,
-            "data": result.tolist()
-        }
-
-        for i, (ip, port) in enumerate(self.peers):
-            print(f"[BROADCAST] → Node {i}")
-            self._send_large(ip, port, msg, "RESULT_CHUNK")
-
-    # -------------------------
-    # RUN
-    # -------------------------
-    def run(self):
-        self.start_server()
-
-        matrix = None
-
-        print("Commands:")
-        print("register")
-        print("generate matrix <size>")
-        print("send <node_id>")
-        print("sum")
-        print("multiply")
-        print("show result")
-        print("quit")
-
-        while True:
-            cmd = input("> ").strip()
-
-            if cmd == "register":
-                self.register()
-
-            elif cmd.startswith("generate matrix"):
-                size = int(cmd.split()[2])
-                matrix = generate_matrix(size)
-                print(f"Generated {matrix.shape}")
-
-            elif cmd.startswith("send"):
-                target = int(cmd.split()[1])
-                self.send_matrix(target, matrix)
-
-            elif cmd == "sum":
-                if not self.received_matrices:
-                    print("No matrices")
-                    continue
-
-                result = PS.sum(self.received_matrices)
-                print("[SUM DONE]")
-                self.broadcast_result(result)
-
-            elif cmd == "multiply":
-                if not self.received_matrices:
-                    print("No matrices")
-                    continue
-
-                result = PS.multiply(self.received_matrices)
-                print("[MULTIPLY DONE]")
-                self.broadcast_result(result)
-
-            elif cmd == "show result":
-                if self.final_result is None:
-                    print("No result available")
-                else:
-                    print("[RESULT]")
-                    print(self.final_result)
-                    print("shape:", self.final_result.shape)
-
-            elif cmd == "quit":
-                self.unregister()
-                sys.exit(0)
-
-            else:
-                print("Unknown command")
+    def collect_metric(self, msg):
+        print(
+            f"[METRIC] Node {msg['node_id']} | "
+            f"ALGO={msg['algo_time']:.2f} ms | "
+            f"GEN={msg['gen_time']:.2f} ms"
+        )
 
 
+# -------------------------
+# MAIN
+# -------------------------
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["tcp", "udp"], required=True)
-    args = parser.parse_args()
+    node = Node()
+    
+    init_matrix(seed=123 + int(time.time()) % 1000)
 
-    node = Node(args.mode)
-    node.run()
+    node.start_server()
+    time.sleep(1)
+    node.register()
+
+    print("Node started. Waiting for RUN command...")
+
+    while True:
+        time.sleep(10)

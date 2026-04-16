@@ -14,31 +14,6 @@ COORDINATOR_IP = "172.21.102.115"
 COORDINATOR_PORT = 8000
 PORT = 9000
 
-
-import uuid
-
-MAX_CHUNK_SIZE = 60000  # safe UDP payload
-
-
-def send_large(node, ip, port, base_msg, obj):
-    data = pickle.dumps(obj)
-
-    chunk_id = str(uuid.uuid4())
-    total = (len(data) + MAX_CHUNK_SIZE - 1) // MAX_CHUNK_SIZE
-
-    for i in range(total):
-        chunk = data[i * MAX_CHUNK_SIZE:(i + 1) * MAX_CHUNK_SIZE]
-
-        msg = base_msg.copy()
-        msg.update({
-            "chunk_id": chunk_id,
-            "chunk_idx": i,
-            "num_chunks": total,
-            "payload": chunk
-        })
-
-        node.send(ip, port, msg)
-
 class Node:
     def __init__(self, mode):
         self.mode = mode

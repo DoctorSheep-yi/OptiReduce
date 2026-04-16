@@ -1,38 +1,30 @@
-# PS.py
 import numpy as np
+import time
 
-def sum(matrices):
-    if not matrices:
-        raise ValueError("No matrices provided")
+def run_ps(node, grad):
+    if node.node_id == 0:
+        print("[PS] Node 0 acting as server")
+        # Add local grad to the buffer manually so we don't wait for a network msg from ourselves
+        with node.lock:
+            node.received.append(grad.tolist())
 
-    # check shape consistency
-    first_shape = matrices[0].shape
-    for m in matrices:
-        if m.shape != first_shape:
-            raise ValueError("All matrices must have the same shape for sum")
+        while True:
+            with node.lock:
+                if len(node.received) == node.num_nodes:
+                    break
+            time.sleep(0.001)
 
-    result = np.zeros_like(matrices[0])
+        # Reconstruct and sum
+        result = np.sum([np.array(g) for g in node.received], axis=0)
+        node.received = [] # Clear
+        print("[PS] Aggregation done")
 
-    for m in matrices:
-        result = result + m
-
-    return result
-
-def multiply(matrices):
-    if not matrices:
-        raise ValueError("No matrices provided")
-
-    result = matrices[0]
-
-    for i in range(1, len(matrices)):
-        m = matrices[i]
-
-        # shape check: (n x k) @ (k x m)
-        if result.shape[1] != m.shape[0]:
-            raise ValueError(
-                f"Incompatible shapes: {result.shape} and {m.shape}"
-            )
-
-        result = result @ m
-
-    return result
+        for i in range(1, node.num_nodes):
+            msg = {"algo": "ps", "phase": "pop", "payload": result.tolist()}
+            node.send(node.peers[i][0], node.peers[i][1], msg, force_mode="tcp")
+        return result
+    else:
+        print(f"[PS] Node {node.node_id} sending gradient")
+        node.send(node.peers[0][0], node.peers[0][1], 
+                  {"algo": "ps", "phase": "push", "payload": grad.tolist()}, force_mode="tcp")
+        return grad

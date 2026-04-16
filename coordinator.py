@@ -1,24 +1,27 @@
+# coordinator.py (FIXED VERSION)
+
 import socket
 import threading
 import pickle
 
 PORT = 8000
 
-nodes = []   # [(ip, port)]
+nodes = []          # [(ip, port)]
+node_ids = {}       # (ip, port) -> id
+next_id = 0
+
 lock = threading.Lock()
 
 
 def broadcast():
-    dead_nodes = []
-
-    for idx, (ip, port) in enumerate(nodes):
+    for (ip, port) in nodes:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((ip, port))
 
             msg = {
                 "type": "PEER_UPDATE",
-                "node_id": idx,
+                "node_id": node_ids[(ip, port)],
                 "peers": nodes
             }
 
@@ -27,23 +30,11 @@ def broadcast():
 
         except Exception as e:
             print(f"[Coordinator] Failed to send to {ip}:{port}: {e}")
-            dead_nodes.append((ip, port))
-
-    # remove dead nodes automatically
-    if dead_nodes:
-        with lock:
-            for n in dead_nodes:
-                if n in nodes:
-                    nodes.remove(n)
-
-        print(f"[Coordinator] Cleaned dead nodes: {dead_nodes}")
-
-        # rebroadcast updated list
-        if nodes:
-            broadcast()
 
 
 def handle_conn(conn, addr):
+    global next_id
+
     data = conn.recv(4096)
 
     try:
@@ -52,27 +43,27 @@ def handle_conn(conn, addr):
         if msg["type"] == "REGISTER":
             ip = addr[0]
             port = msg["port"]
+            node = (ip, port)
 
             with lock:
-                if (ip, port) not in nodes:
-                    nodes.append((ip, port))
-                    nodes.sort()
+                if node not in nodes:
+                    nodes.append(node)
+                    node_ids[node] = next_id
+                    print(f"[Coordinator] Assign ID {next_id} to {node}")
+                    next_id += 1
 
-            print(f"[Coordinator] Registered: {ip}:{port}")
             print(f"[Coordinator] Nodes: {nodes}")
-
             broadcast()
 
         elif msg["type"] == "UNREGISTER":
             ip = addr[0]
             port = msg["port"]
+            node = (ip, port)
 
             with lock:
-                if (ip, port) in nodes:
-                    nodes.remove((ip, port))
-
-            print(f"[Coordinator] Unregistered: {ip}:{port}")
-            print(f"[Coordinator] Nodes: {nodes}")
+                if node in nodes:
+                    nodes.remove(node)
+                    del node_ids[node]
 
             broadcast()
 

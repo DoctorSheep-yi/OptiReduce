@@ -20,3 +20,6 @@ def generate_matrix(n, dtype=np.float32):
         )
 
     return np.random.rand(n, n).astype(dtype)
+
+if __name__ == "__main__":
+    generate_matrix(10000)

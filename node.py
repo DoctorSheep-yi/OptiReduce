@@ -17,12 +17,22 @@ PORT = 9000
 
 class Node:
     def __init__(self, mode):
-        self.mode = mode  # tcp | udp
+        self.mode = mode
         self.peers = []
         self.node_id = None
         self.num_nodes = None
 
         self.local_matrix = None
+
+        self.done_count = 0
+        self.lock = threading.Lock()
+
+        self.algo = None
+        self.start_time = None
+
+        # 🔥 buffers for algorithms
+        self.ring_buffer = []
+        self.opti_buffer = []
 
     # -------------------------
     # NETWORK
@@ -95,69 +105,123 @@ class Node:
     def handle_message(self, msg):
         t = msg.get("type")
 
+        # ---------- coordinator ----------
         if t == "PEER_UPDATE":
             self.peers = msg["peers"]
             self.node_id = msg["node_id"]
             self.num_nodes = len(self.peers)
-
             print(f"[Node {self.node_id}] Peers updated")
             return
 
+        # ---------- start experiment ----------
         if t == "START":
             threading.Thread(target=self.run_experiment, args=(msg,), daemon=True).start()
             return
 
-        # algorithm messages forwarded
-        if self.algo_handler:
-            self.algo_handler(msg)
+        # ---------- completion ----------
+        if t == "DONE":
+            if self.node_id == 0:
+                with self.lock:
+                    self.done_count += 1
+            return
+
+        # ==================================================
+        # 🔥 ALGORITHM MESSAGE HANDLING (THIS IS WHAT YOU ASKED)
+        # ==================================================
+        algo = msg.get("algo")
+
+        if algo == "ring":
+            shard = np.array(msg["payload"])
+            self.ring_buffer.append(shard)
+            return
+
+        if algo == "optireduce":
+            self.opti_buffer.append(msg)
+            return
+
+        if algo == "ps":
+            self.handle_ps(msg)
+            return
+
+    # -------------------------
+    # PS HANDLER
+    # -------------------------
+    def handle_ps(self, msg):
+        phase = msg.get("phase")
+
+        if phase == "push":
+            if not hasattr(self, "ps_buffer"):
+                self.ps_buffer = []
+
+            data = np.array(msg["payload"])
+            self.ps_buffer.append(data)
+
+        elif phase == "result":
+            result = np.array(msg["payload"])
+            print(f"[Node {self.node_id}] Received result")
 
     # -------------------------
     # EXPERIMENT
     # -------------------------
     def run_experiment(self, msg):
-        algo = msg["algo"]
+        self.algo = msg["algo"]
         size = msg["size"]
 
-        print(f"[Node {self.node_id}] START {algo}, size={size}")
+        print(f"[Node {self.node_id}] START {self.algo}, size={size}")
 
         # ---------- NOT TIMED ----------
         self.local_matrix = generate_matrix(size).astype(np.float32)
         gradient = np.tanh(self.local_matrix)
         # --------------------------------
 
-        # barrier (simple)
-        time.sleep(1)
+        time.sleep(1)  # simple barrier
 
-        start = time.perf_counter()
+        if self.node_id == 0:
+            self.done_count = 0
+            self.start_time = time.perf_counter()
 
-        if algo == "ps":
+        # -------------------------
+        # RUN ALGORITHM
+        # -------------------------
+        if self.algo == "ps":
             result = run_ps(self, gradient)
 
-        elif algo == "ring":
+        elif self.algo == "ring":
             result = run_ring(self, gradient)
 
-        elif algo == "optireduce":
+        elif self.algo == "optireduce":
             result = run_optireduce(self, gradient)
 
         else:
             raise ValueError("Unknown algo")
 
-        latency = (time.perf_counter() - start) * 1000
+        # -------------------------
+        # DONE SIGNAL
+        # -------------------------
+        if self.node_id != 0:
+            ip, port = self.peers[0]
+            self.send(ip, port, {"type": "DONE"})
+        else:
+            with self.lock:
+                self.done_count += 1
 
-        print(f"[Node {self.node_id}] DONE {algo} latency={latency:.2f} ms")
+            while True:
+                with self.lock:
+                    if self.done_count == self.num_nodes:
+                        break
+                time.sleep(0.001)
+
+            latency = (time.perf_counter() - self.start_time) * 1000
+            print(f"\n[FINAL] {self.algo} latency = {latency:.2f} ms\n")
 
     # -------------------------
-    # CLI (ONLY NODE 0)
+    # CLI (NODE 0 ONLY)
     # -------------------------
     def cli(self):
         while True:
             cmd = input(">> ").strip().split()
 
-            if not cmd:
-                continue
-
             if cmd[0] == "start":
-                # start <algo> <size>
                 algo = cmd[1]
                 size = int(cmd[2])
 
@@ -187,5 +251,4 @@ if __name__ == "__main__":
 
     time.sleep(2)
 
-    if True:
-        node.cli()
+    node.cli()

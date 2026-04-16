@@ -1,16 +1,19 @@
 import numpy as np
 import time
 
+buffer = []
 
 def run_ps(node, grad):
-    if node.node_id == 0:
-        collected = [grad]
+    global buffer
 
-        while len(collected) < node.num_nodes:
+    if node.node_id == 0:
+        buffer = [grad]
+
+        while len(buffer) < node.num_nodes:
             time.sleep(0.001)
 
         result = np.zeros_like(grad)
-        for g in collected:
+        for g in buffer:
             result += g
 
         msg = {

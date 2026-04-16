@@ -6,27 +6,23 @@ def run_optireduce(node, grad):
     shards = np.array_split(grad.flatten(), n)
     my_shard_id = node.node_id
     local_piece = shards[my_shard_id].copy()
-    T_BOUND = 0.5 
 
     for i in range(n):
         if i == node.node_id: continue
         msg = {"algo": "optireduce", "phase": "shard", "shard_id": i, "payload": shards[i].tolist()}
         node.send(node.peers[i][0], node.peers[i][1], msg, force_mode="udp")
 
-    start = time.time()
     received = 0
-    while received < (n - 1) and (time.time() - start) < T_BOUND:
+    while received < (n - 1):
         found = None
         with node.lock:
-            for i, m in enumerate(node.opti_buffer):
-                if m.get("phase") == "shard" and m["shard_id"] == my_shard_id:
-                    found = np.array(node.opti_buffer.pop(i)["payload"])
-                    break
+            if node.opti_buffer:
+                msg = node.opti_buffer.pop(0)
+                if msg["shard_id"] == my_shard_id:
+                    found = np.array(msg["payload"])
         if found is not None:
             local_piece += found; received += 1
         else: time.sleep(0.001)
-
-    if received < n-1: print(f"[Node {node.node_id}] OptiReduce: Missing {n-1-received} shards, proceeding...")
 
     for i in range(n):
         if i == node.node_id: continue
@@ -34,14 +30,12 @@ def run_optireduce(node, grad):
         node.send(node.peers[i][0], node.peers[i][1], msg, force_mode="udp")
 
     final_shards = {my_shard_id: local_piece}
-    start = time.time()
-    while len(final_shards) < n and (time.time() - start) < T_BOUND:
+    while len(final_shards) < n:
         with node.lock:
-            for i, m in enumerate(node.opti_buffer):
-                if m.get("phase") == "agg" and m["shard_id"] not in final_shards:
-                    msg = node.opti_buffer.pop(i)
+            if node.opti_buffer:
+                msg = node.opti_buffer.pop(0)
+                if msg["phase"] == "agg":
                     final_shards[msg["shard_id"]] = np.array(msg["payload"])
-                    break
         time.sleep(0.001)
 
     res = [final_shards.get(i, np.zeros_like(shards[i])) for i in range(n)]

@@ -83,6 +83,7 @@ class Node:
             self.peers, self.node_id, self.num_nodes = msg["peers"], msg["node_id"], len(msg["peers"])
             print(f"\n[Node {self.node_id}] Peers updated. {self.num_nodes} nodes in ring.")
         elif t == "START":
+            # IMPORTANT: Start in thread so Node 0 doesn't block its own receiver
             threading.Thread(target=self.run_experiment, args=(msg,), daemon=True).start()
         elif t == "DONE":
             with self.lock: self.done_count += 1
@@ -125,7 +126,7 @@ class Node:
             print(f"\n[FINAL] {self.algo} latency = {(time.perf_counter()-self.start_time)*1000:.2f} ms\n>> ", end="")
 
     def cli(self):
-        print("Commands: register, start <algo> <size>, noise <type> <val>")
+        print("type 'register', then 'start <algo> <size>'")
         while True:
             cmd = input(">> ").strip().split()
             if not cmd: continue

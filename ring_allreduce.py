@@ -8,7 +8,6 @@ def run_ring(node, grad):
 
     for step in range(n - 1):
         s_idx = (node.node_id - step) % n
-        print(f" [Ring] Step {step+1}: Sending shard {s_idx}")
         node.send(node.peers[right][0], node.peers[right][1], 
                   {"algo": "ring", "phase": "scat", "step": step, "pay": shards[s_idx].tolist()}, force_mode="tcp")
         

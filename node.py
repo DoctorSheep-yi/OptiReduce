@@ -6,8 +6,8 @@ import numpy as np
 
 from matrix import generate_matrix
 
-from ps import run_ps
-from ring import run_ring
+from PS import run_ps
+from ring_allreduce import run_ring
 from optireduce import run_optireduce
 
 COORDINATOR_IP = "172.21.102.115"

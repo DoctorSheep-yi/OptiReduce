@@ -1,16 +1,17 @@
 import numpy as np
 import time
 
-
 def run_optireduce(node, grad):
     n = node.num_nodes
 
-    flat = grad.flatten().astype(np.float64)
+    # Match the np.float32 type from your node.py
+    flat = grad.flatten().astype(np.float32)
     shards = np.array_split(flat, n)
 
     my_shard_id = node.node_id
     local_piece = shards[my_shard_id].copy()
 
+    print(f"[OptiReduce] Node {node.node_id} sending shards")
     # -------------------------
     # SEND shards to all peers
     # -------------------------
@@ -24,7 +25,8 @@ def run_optireduce(node, grad):
             "phase": "shard",
             "src": node.node_id,
             "shard_id": i,
-            "payload": shards[i].tolist()
+            "chunked": False,
+            "payload": shards[i] # Send Numpy Array Directly
         }
 
         ip, port = node.peers[i]
@@ -36,15 +38,20 @@ def run_optireduce(node, grad):
     received = 0
 
     while received < (n - 1):
-        if hasattr(node, "opti_buffer") and node.opti_buffer:
-            msg = node.opti_buffer.pop(0)
-
-            if msg["shard_id"] == my_shard_id:
-                local_piece += np.array(msg["payload"])
-                received += 1
+        found_payload = None
+        with node.lock:
+            for i, m in enumerate(node.opti_buffer):
+                if m["phase"] == "shard" and m["shard_id"] == my_shard_id:
+                    found_payload = node.opti_buffer.pop(i)["payload"]
+                    break
+        
+        if found_payload is not None:
+            local_piece += found_payload
+            received += 1
         else:
             time.sleep(0.001)
 
+    print(f"[OptiReduce] Node {node.node_id} broadcasting aggregated shard")
     # -------------------------
     # BROADCAST aggregated shard
     # -------------------------
@@ -58,7 +65,8 @@ def run_optireduce(node, grad):
             "phase": "agg",
             "src": node.node_id,
             "shard_id": my_shard_id,
-            "payload": local_piece.tolist()
+            "chunked": False,
+            "payload": local_piece # Send Numpy Array Directly
         }
 
         ip, port = node.peers[i]
@@ -70,13 +78,22 @@ def run_optireduce(node, grad):
     final_shards = {my_shard_id: local_piece}
 
     while len(final_shards) < n:
-        if node.opti_buffer:
-            msg = node.opti_buffer.pop(0)
-            if msg["phase"] == "agg":
-                sid = msg["shard_id"]
-                final_shards[sid] = np.array(msg["payload"])
+        found_shard_id = None
+        found_payload = None
+        
+        with node.lock:
+            for i, m in enumerate(node.opti_buffer):
+                if m["phase"] == "agg" and m["shard_id"] not in final_shards:
+                    msg = node.opti_buffer.pop(i)
+                    found_shard_id = msg["shard_id"]
+                    found_payload = msg["payload"]
+                    break
+                    
+        if found_shard_id is not None:
+            final_shards[found_shard_id] = found_payload
         else:
             time.sleep(0.001)
 
+    print(f"[OptiReduce] Node {node.node_id} Aggregation done")
     result = np.concatenate([final_shards[i] for i in range(n)])
     return result.reshape(grad.shape)

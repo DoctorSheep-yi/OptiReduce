@@ -3,9 +3,9 @@ import threading
 import pickle
 import time
 import numpy as np
+import uuid
 
 from matrix import generate_matrix
-
 from PS import run_ps
 from ring_allreduce import run_ring
 from optireduce import run_optireduce
@@ -45,7 +45,6 @@ class Node:
 
         chunk_id = str(uuid.uuid4())
         chunk_size = 800
-
         total = (len(data) + chunk_size - 1) // chunk_size
 
         for i in range(total):
@@ -63,6 +62,7 @@ class Node:
             sock.sendto(pickle.dumps(chunk_msg), (ip, port))
             sock.close()
 
+            # Throttle to prevent UDP packet loss
             time.sleep(0.0005)
 
     def send(self, ip, port, msg):
@@ -73,7 +73,6 @@ class Node:
             sock.connect((ip, port))
             sock.sendall(data)
             sock.close()
-
         else:
             if len(data) <= MAX_CHUNK_SIZE:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -82,15 +81,15 @@ class Node:
             else:
                 self._send_chunked(ip, port, msg)
 
-        def broadcast(self, msg):
-            print(f"[Node {self.node_id}] Broadcasting {msg['type']} ({self.mode})")
-            for i, (ip, port) in enumerate(self.peers):
-                if i == self.node_id:
-                    continue
-                self.send(ip, port, msg)
+    def broadcast(self, msg):
+        print(f"[Node {self.node_id}] Broadcasting {msg['type']} ({self.mode})")
+        for i, (ip, port) in enumerate(self.peers):
+            if i == self.node_id:
+                continue
+            self.send(ip, port, msg)
 
     # -------------------------
-    # REGISTER
+    # REGISTRATION & SERVERS
     # -------------------------
     def register(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -99,25 +98,16 @@ class Node:
         sock.sendall(pickle.dumps(msg))
         sock.close()
 
-    # -------------------------
-    # SERVER START
-    # -------------------------
     def start_server(self):
         threading.Thread(target=self.tcp_server, daemon=True).start()
-
         if self.mode == "udp":
             threading.Thread(target=self.udp_server, daemon=True).start()
 
-    # -------------------------
-    # TCP SERVER
-    # -------------------------
     def tcp_server(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.bind(("0.0.0.0", PORT))
         server.listen()
-
         print("[TCP] Listening...")
-
         while True:
             conn, _ = server.accept()
             threading.Thread(target=self.handle_conn, args=(conn,), daemon=True).start()
@@ -126,27 +116,19 @@ class Node:
         data = b""
         while True:
             chunk = conn.recv(65536)
-            if not chunk:
-                break
+            if not chunk: break
             data += chunk
-
         conn.close()
-
         try:
             msg = pickle.loads(data)
             self.handle_message(msg)
         except Exception as e:
             print("[TCP ERROR]", e)
 
-    # -------------------------
-    # UDP SERVER (🔥 FIX)
-    # -------------------------
     def udp_server(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(("0.0.0.0", PORT))
-
         print("[UDP] Listening...")
-
         while True:
             data, _ = sock.recvfrom(65536)
             try:
@@ -159,40 +141,28 @@ class Node:
     # MESSAGE HANDLER
     # -------------------------
     def handle_message(self, msg):
-        t = msg.get("type")
-
         # ---------- CHUNK HANDLING ----------
         if msg.get("chunked", False):
-
             cid = msg["chunk_id"]
-
             if cid not in self.chunk_buffer:
-                self.chunk_buffer[cid] = {
-                    "chunks": {},
-                    "total": msg["num_chunks"]
-                }
+                self.chunk_buffer[cid] = {"chunks": {}, "total": msg["num_chunks"]}
 
             self.chunk_buffer[cid]["chunks"][msg["chunk_idx"]] = msg["payload"]
 
             if len(self.chunk_buffer[cid]["chunks"]) == msg["num_chunks"]:
                 chunks = self.chunk_buffer[cid]["chunks"]
-
                 try:
                     data = b"".join(chunks[i] for i in range(msg["num_chunks"]))
+                    msg = pickle.loads(data)
+                    del self.chunk_buffer[cid]
                 except KeyError:
                     print("[CHUNK ERROR] Missing chunk")
                     return
-
-                full_payload = pickle.loads(data)
-
-                msg["payload"] = full_payload
-                msg["chunked"] = False  # now it's normal
-                del self.chunk_buffer[cid]
-
             else:
-                return  # wait for more chunks
+                return 
 
-        # ---------- coordinator ----------
+        # ---------- LOGIC ----------
+        t = msg.get("type")
         if t == "PEER_UPDATE":
             self.peers = msg["peers"]
             self.node_id = msg["node_id"]
@@ -200,95 +170,73 @@ class Node:
             print(f"[Node {self.node_id}] Peers updated")
             return
 
-        # ---------- START ----------
         if t == "START":
             print(f"[Node {self.node_id}] Received START")
             threading.Thread(target=self.run_experiment, args=(msg,), daemon=True).start()
             return
 
-        # ---------- DONE ----------
         if t == "DONE":
             if self.node_id == 0:
                 with self.lock:
                     self.done_count += 1
             return
 
-        # ---------- ALGO ----------
+        # Route to the correct algorithm buffer
         algo = msg.get("algo")
-
-        if algo == "ring":
-            self.ring_buffer.append(np.array(msg["payload"]))
-            return
-
-        if algo == "optireduce":
-            self.opti_buffer.append(msg)
-            return
-
         if algo == "ps":
             self.handle_ps(msg)
-            return
+        elif algo == "ring":
+            with self.lock:
+                self.ring_buffer.append(msg)
+        elif algo == "optireduce":
+            with self.lock:
+                self.opti_buffer.append(msg)
 
-    # -------------------------
-    # PS HANDLER
-    # -------------------------
     def handle_ps(self, msg):
         phase = msg.get("phase")
-
         if phase == "push":
-            data = msg["payload"]   # ✅ IMPORTANT FIX (no np.array)
-
+            data = msg["payload"]
             with self.lock:
                 self.received.append(data)
-
             print(f"[PS] Node {self.node_id} received PUSH "
                 f"({len(self.received)}/{self.num_nodes})")
-
         elif phase == "result":
             print(f"[Node {self.node_id}] Received FINAL RESULT")
 
-    # -------------------------
-    # EXPERIMENT
-    # -------------------------
     def run_experiment(self, msg):
         self.algo = msg["algo"]
         size = msg["size"]
-
         print(f"[Node {self.node_id}] START {self.algo}, size={size}")
 
-        # ---------- NOT TIMED ----------
-        print(f"[Node {self.node_id}] Generating matrix...")
         self.local_matrix = generate_matrix(size).astype(np.float32)
-
         print(f"[Node {self.node_id}] Computing gradient...")
         gradient = np.tanh(self.local_matrix)
 
-        time.sleep(1)  # barrier
+        time.sleep(1) 
 
         if self.node_id == 0:
             self.done_count = 0
             self.start_time = time.perf_counter()
 
-        # ---------- RUN ----------
+        # ---------- EXECUTE ALGORITHM ----------
         if self.algo == "ps":
             result = run_ps(self, gradient)
-
         elif self.algo == "ring":
             result = run_ring(self, gradient)
-
         elif self.algo == "optireduce":
             result = run_optireduce(self, gradient)
-
         else:
-            raise ValueError("Unknown algo")
-
-        # ---------- DONE ----------
+            print(f"[ERROR] Unknown algorithm: {self.algo}")
+            return
+        
+        # ---------- SYNCHRONIZATION ----------
         if self.node_id != 0:
             ip, port = self.peers[0]
             self.send(ip, port, {"type": "DONE"})
+            print(f"[Node {self.node_id}] Finished {self.algo}. Sent DONE to Node 0.")
         else:
             with self.lock:
                 self.done_count += 1
-
             while True:
                 with self.lock:
                     if self.done_count == self.num_nodes:
@@ -298,44 +246,26 @@ class Node:
             latency = (time.perf_counter() - self.start_time) * 1000
             print(f"\n[FINAL] {self.algo} latency = {latency:.2f} ms\n")
 
-    # -------------------------
-    # CLI (NODE 0 ONLY)
-    # -------------------------
     def cli(self):
         while True:
             cmd = input(">> ").strip().split()
-
-            if not cmd:
-                continue
-
+            if not cmd: continue
             if cmd[0] == "start":
-                algo = cmd[1]
-                size = int(cmd[2])
-
-                msg = {
-                    "type": "START",
-                    "algo": algo,
-                    "size": size
-                }
-
+                algo, size = cmd[1], int(cmd[2])
+                msg = {"type": "START", "algo": algo, "size": size}
                 self.broadcast(msg)
                 self.run_experiment(msg)
 
-
 if __name__ == "__main__":
     import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["tcp", "udp"], required=True)
     args = parser.parse_args()
 
     node = Node(args.mode)
     node.start_server()
-
     print("type 'register'")
     input("> ")
     node.register()
-
     time.sleep(2)
-
     node.cli()

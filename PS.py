@@ -3,56 +3,20 @@ import time
 import pickle
 import uuid
 
-from globals  import *
-
+from globals import *
 
 # -------------------------
-# AUTO SEND (FAST + CHUNKED)
+# AUTO SEND (RELIANT ON NODE)
 # -------------------------
 def send_auto(node, ip, port, base_msg, obj):
-    data = pickle.dumps(obj)
-
-    if len(data) <= MAX_CHUNK_SIZE:
-        # -------- FAST PATH --------
-        msg = base_msg.copy()
-        msg.update({
-            "chunked": False,
-            "payload": obj
-        })
-        print(f"[SEND] Direct ({len(data)} bytes)")
-        node.send(ip, port, msg)
-
-    else:
-        # -------- SLOW PATH --------
-        print(f"[SEND] Chunking ({len(data)} bytes)")
-        send_large(node, ip, port, base_msg, obj)
-
-
-# -------------------------
-# CHUNKED SEND
-# -------------------------
-def send_large(node, ip, port, base_msg, obj):
-    data = pickle.dumps(obj)
-
-    chunk_id = str(uuid.uuid4())
-    total = (len(data) + MAX_CHUNK_SIZE - 1) // MAX_CHUNK_SIZE
-
-    for i in range(total):
-        chunk = data[i * MAX_CHUNK_SIZE:(i + 1) * MAX_CHUNK_SIZE]
-
-        msg = base_msg.copy()
-        msg.update({
-            "chunked": True,
-            "chunk_id": chunk_id,
-            "chunk_idx": i,
-            "num_chunks": total,
-            "payload": chunk
-        })
-
-        print(f"[PS] Sending chunk {i+1}/{total}")
-        node.send(ip, port, msg)
-        time.sleep(0.0005)
-
+    # We pass the object directly. node.send will handle 
+    # the pickling and chunking if it's too large.
+    msg = base_msg.copy()
+    msg.update({
+        "chunked": False,
+        "payload": obj
+    })
+    node.send(ip, port, msg)
 
 # -------------------------
 # PARAMETER SERVER

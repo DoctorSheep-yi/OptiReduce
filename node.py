@@ -30,12 +30,13 @@ class Node:
         self.algo = None
         self.start_time = None
 
-        # 🔥 buffers for algorithms
+        # shared buffers
         self.ring_buffer = []
         self.opti_buffer = []
+        self.received = []
 
     # -------------------------
-    # NETWORK
+    # NETWORK SEND
     # -------------------------
     def send(self, ip, port, msg):
         data = pickle.dumps(msg)
@@ -51,6 +52,7 @@ class Node:
             sock.close()
 
     def broadcast(self, msg):
+        print(f"[Node {self.node_id}] Broadcasting {msg['type']} ({self.mode})")
         for i, (ip, port) in enumerate(self.peers):
             if i == self.node_id:
                 continue
@@ -67,17 +69,23 @@ class Node:
         sock.close()
 
     # -------------------------
-    # SERVER
+    # SERVER START
     # -------------------------
     def start_server(self):
         threading.Thread(target=self.tcp_server, daemon=True).start()
 
+        if self.mode == "udp":
+            threading.Thread(target=self.udp_server, daemon=True).start()
+
+    # -------------------------
+    # TCP SERVER
+    # -------------------------
     def tcp_server(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.bind(("0.0.0.0", PORT))
         server.listen()
 
-        print("[Node] Listening...")
+        print("[TCP] Listening...")
 
         while True:
             conn, _ = server.accept()
@@ -97,7 +105,24 @@ class Node:
             msg = pickle.loads(data)
             self.handle_message(msg)
         except Exception as e:
-            print("[ERROR]", e)
+            print("[TCP ERROR]", e)
+
+    # -------------------------
+    # UDP SERVER (🔥 FIX)
+    # -------------------------
+    def udp_server(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("0.0.0.0", PORT))
+
+        print("[UDP] Listening...")
+
+        while True:
+            data, _ = sock.recvfrom(65536)
+            try:
+                msg = pickle.loads(data)
+                self.handle_message(msg)
+            except Exception as e:
+                print("[UDP ERROR]", e)
 
     # -------------------------
     # MESSAGE HANDLER
@@ -110,24 +135,24 @@ class Node:
             self.peers = msg["peers"]
             self.node_id = msg["node_id"]
             self.num_nodes = len(self.peers)
-            print(f"[Node {self.node_id}] Peers updated")
+
+            print(f"[Node {self.node_id}] Peers updated: {self.peers}")
             return
 
-        # ---------- start experiment ----------
+        # ---------- START ----------
         if t == "START":
+            print(f"[Node {self.node_id}] Received START")
             threading.Thread(target=self.run_experiment, args=(msg,), daemon=True).start()
             return
 
-        # ---------- completion ----------
+        # ---------- DONE ----------
         if t == "DONE":
             if self.node_id == 0:
                 with self.lock:
                     self.done_count += 1
             return
 
-        # ==================================================
-        # 🔥 ALGORITHM MESSAGE HANDLING (THIS IS WHAT YOU ASKED)
-        # ==================================================
+        # ---------- ALGORITHM ----------
         algo = msg.get("algo")
 
         if algo == "ring":
@@ -155,10 +180,11 @@ class Node:
             with self.lock:
                 self.received.append(data)
 
-            print(f"[PS] received {len(self.received)}/{self.num_nodes}")
+            print(f"[PS] Node {self.node_id} received PUSH "
+                  f"({len(self.received)}/{self.num_nodes})")
 
         elif phase == "result":
-            print(f"[Node {self.node_id}] RESULT received")
+            print(f"[Node {self.node_id}] Received FINAL RESULT")
 
     # -------------------------
     # EXPERIMENT
@@ -172,19 +198,17 @@ class Node:
         # ---------- NOT TIMED ----------
         print(f"[Node {self.node_id}] Generating matrix...")
         self.local_matrix = generate_matrix(size).astype(np.float32)
+
         print(f"[Node {self.node_id}] Computing gradient...")
         gradient = np.tanh(self.local_matrix)
-        # --------------------------------
 
-        time.sleep(1)  # simple barrier
+        time.sleep(1)  # barrier
 
         if self.node_id == 0:
             self.done_count = 0
             self.start_time = time.perf_counter()
 
-        # -------------------------
-        # RUN ALGORITHM
-        # -------------------------
+        # ---------- RUN ----------
         if self.algo == "ps":
             result = run_ps(self, gradient)
 
@@ -197,9 +221,7 @@ class Node:
         else:
             raise ValueError("Unknown algo")
 
-        # -------------------------
-        # DONE SIGNAL
-        # -------------------------
+        # ---------- DONE ----------
         if self.node_id != 0:
             ip, port = self.peers[0]
             self.send(ip, port, {"type": "DONE"})
@@ -222,6 +244,9 @@ class Node:
     def cli(self):
         while True:
             cmd = input(">> ").strip().split()
+
+            if not cmd:
+                continue
 
             if cmd[0] == "start":
                 algo = cmd[1]

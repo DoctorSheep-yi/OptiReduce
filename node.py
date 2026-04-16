@@ -150,15 +150,15 @@ class Node:
         phase = msg.get("phase")
 
         if phase == "push":
-            if not hasattr(self, "ps_buffer"):
-                self.ps_buffer = []
-
             data = np.array(msg["payload"])
-            self.ps_buffer.append(data)
+
+            with self.lock:
+                self.received.append(data)
+
+            print(f"[PS] received {len(self.received)}/{self.num_nodes}")
 
         elif phase == "result":
-            result = np.array(msg["payload"])
-            print(f"[Node {self.node_id}] Received result")
+            print(f"[Node {self.node_id}] RESULT received")
 
     # -------------------------
     # EXPERIMENT
@@ -170,7 +170,9 @@ class Node:
         print(f"[Node {self.node_id}] START {self.algo}, size={size}")
 
         # ---------- NOT TIMED ----------
+        print(f"[Node {self.node_id}] Generating matrix...")
         self.local_matrix = generate_matrix(size).astype(np.float32)
+        print(f"[Node {self.node_id}] Computing gradient...")
         gradient = np.tanh(self.local_matrix)
         # --------------------------------
 

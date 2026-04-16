@@ -1,20 +1,24 @@
 import numpy as np
 import time
 
-buffer = []
 
 def run_ps(node, grad):
-    global buffer
-
     if node.node_id == 0:
-        buffer = [grad]
+        print("[PS] Node 0 acting as server")
 
-        while len(buffer) < node.num_nodes:
+        # SAME variable as original node.py
+        node.received = [grad]
+
+        while True:
+            if len(node.received) == node.num_nodes:
+                break
             time.sleep(0.001)
 
         result = np.zeros_like(grad)
-        for g in buffer:
+        for g in node.received:
             result += g
+
+        print("[PS] Aggregation done")
 
         msg = {
             "type": "DATA",
@@ -27,6 +31,8 @@ def run_ps(node, grad):
         return result
 
     else:
+        print(f"[PS] Node {node.node_id} sending gradient")
+
         ip, port = node.peers[0]
 
         msg = {

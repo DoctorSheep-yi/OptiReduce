@@ -36,7 +36,7 @@ class Node:
 
     def send(self, ip, port, msg, force_mode=None):
         mode = force_mode if force_mode else self.mode
-        # If UDP and we should drop it according to noise.py, just return
+        # Application-level UDP drop check
         if mode == "udp" and self.noise.should_drop_udp():
             return
 
@@ -82,17 +82,13 @@ class Node:
         t = msg.get("type")
         if t == "PEER_UPDATE":
             self.peers, self.node_id, self.num_nodes = msg["peers"], msg["node_id"], len(msg["peers"])
+            print(f"\n[Node {self.node_id}] Peers updated: {len(self.peers)} nodes total.")
         elif t == "START":
             threading.Thread(target=self.run_experiment, args=(msg,), daemon=True).start()
         elif t == "DONE":
             with self.lock: self.done_count += 1
         elif t == "NOISE":
-            if msg["action"] == "straggler":
-                self.noise.enable_straggler = msg["enable"]
-                self.noise.sleep_time = float(msg["val"])
-            elif msg["action"] == "loss":
-                if msg["enable"]: self.noise.apply_packet_loss_tc(msg["val"])
-                else: self.noise.clear_tc()
+            self._apply_noise_msg(msg)
         elif msg.get("algo") == "ring":
             with self.lock: self.ring_buffer.append(msg)
         elif msg.get("algo") == "optireduce":
@@ -101,40 +97,68 @@ class Node:
             if msg.get("phase") == "push":
                 with self.lock: self.received.append(msg["payload"])
 
+    def _apply_noise_msg(self, msg):
+        action = msg["action"]
+        if action == "straggler":
+            self.noise.enable_straggler = msg["enable"]
+            self.noise.sleep_time = float(msg["val"])
+            print(f"[Noise] Straggler set to {msg['enable']} ({msg['val']}s)")
+        elif action == "loss":
+            if msg["enable"]: self.noise.apply_packet_loss_tc(msg["val"])
+            else: self.noise.clear_tc()
+
     def run_experiment(self, msg):
         self.algo, size = msg["algo"], msg["size"]
+        print(f"\n[Node {self.node_id}] STARTING {self.algo} (size={size})")
+        
         self.local_matrix = generate_matrix(size)
         grad = np.tanh(self.local_matrix)
+        print(f"[Node {self.node_id}] Local gradient computed.")
         
         self.noise.apply_straggler()
         if self.node_id == 0:
             self.done_count = 0
             self.start_time = time.perf_counter()
 
+        # Run Algorithms
         if self.algo == "ps": run_ps(self, grad)
         elif self.algo == "ring": run_ring(self, grad)
         elif self.algo == "optireduce": run_optireduce(self, grad)
 
+        # Finished Sync
         if self.node_id != 0:
+            print(f"[Node {self.node_id}] Finished {self.algo}. Sending DONE to Node 0.")
             self.send(self.peers[0][0], self.peers[0][1], {"type": "DONE"}, force_mode="tcp")
         else:
             with self.lock: self.done_count += 1
             while self.done_count < self.num_nodes: time.sleep(0.01)
-            print(f"\n[FINAL] {self.algo} latency = {(time.perf_counter()-self.start_time)*1000:.2f} ms\n>> ", end="")
+            latency = (time.perf_counter()-self.start_time)*1000
+            print(f"\n[FINAL] {self.algo} latency = {latency:.2f} ms\n>> ", end="")
+
+    def register(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((COORDINATOR_IP, COORDINATOR_PORT))
+        s.sendall(pickle.dumps({"type": "REGISTER", "port": PORT}))
+        s.close()
 
     def cli(self):
+        print("\nCommands: 'register', 'start <algo> <size>', 'noise <straggler/loss> <val>', 'exit'")
         while True:
             cmd = input(">> ").strip().split()
             if not cmd: continue
-            if cmd[0] == "start":
+            if cmd[0] == "register":
+                self.register()
+            elif cmd[0] == "start":
                 m = {"type": "START", "algo": cmd[1], "size": int(cmd[2])}
                 self.broadcast(m)
                 self.run_experiment(m)
-            elif cmd[0] == "noise": # Noise command for original CLI
+            elif cmd[0] == "noise":
                 enable = cmd[2] != "0"
                 m = {"type": "NOISE", "action": cmd[1], "enable": enable, "val": cmd[2]}
                 self.broadcast(m)
                 self.handle_message(m)
+            elif cmd[0] == "exit":
+                break
 
     def start_server(self):
         def tcp():
@@ -150,7 +174,8 @@ class Node:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("0.0.0.0", PORT))
             while True:
                 d, _ = s.recvfrom(65536)
-                self.handle_message(pickle.loads(d))
+                try: self.handle_message(pickle.loads(d))
+                except: pass
         threading.Thread(target=tcp, daemon=True).start()
         threading.Thread(target=udp, daemon=True).start()
 

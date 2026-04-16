@@ -6,7 +6,7 @@ def run_optireduce(node, grad):
     shards = np.array_split(grad.flatten(), n)
     my_shard_id = node.node_id
     local_piece = shards[my_shard_id].copy()
-    T_BOUND = 0.5 # Wait at most 0.5s for packets (The "Bounded" in UBT)
+    T_BOUND = 0.5 
 
     # 1. Scatter (UDP)
     for i in range(n):
@@ -26,6 +26,9 @@ def run_optireduce(node, grad):
         if found is not None:
             local_piece += found; received += 1
         else: time.sleep(0.001)
+
+    if received < (n - 1):
+        print(f"[OptiReduce] Aggregation TIMEOUT. Only got {received}/{n-1} shards.")
 
     # 3. Broadcast
     for i in range(n):

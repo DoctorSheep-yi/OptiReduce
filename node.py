@@ -4,6 +4,7 @@ import pickle
 import time
 import numpy as np
 import uuid
+import sys
 
 from matrix import generate_matrix
 from PS import run_ps
@@ -12,7 +13,13 @@ from optireduce import run_optireduce
 from noise import Noise
 from globals import *
 
+MAX_CHUNK_SIZE = 1200
+UDP_TIMEOUT = 30  # seconds (change to 300 for 5 min)
 
+
+# =========================
+# TCP helper
+# =========================
 def recv_exact(sock, size):
     data = b''
     while len(data) < size:
@@ -29,13 +36,17 @@ class Node:
         self.peers = []
         self.node_id = None
         self.num_nodes = None
+
         self.local_matrix = None
         self.done_count = 0
         self.lock = threading.Lock()
+
         self.algo = None
         self.start_time = None
+
         self.noise = Noise()
 
+        # buffers
         self.ring_buffer = []
         self.opti_buffer = []
         self.received = []
@@ -43,7 +54,7 @@ class Node:
         self.final_result = None
 
     # =========================
-    # SEND LOGIC
+    # SEND
     # =========================
     def send(self, ip, port, msg, force_mode=None):
         mode = force_mode if force_mode else self.mode
@@ -59,7 +70,7 @@ class Node:
                 sock.settimeout(5)
                 sock.connect((ip, port))
 
-                # length-prefixed
+                # length-prefixed framing
                 sock.sendall(len(data).to_bytes(4, 'big') + data)
                 sock.close()
 
@@ -94,7 +105,7 @@ class Node:
     # =========================
     def handle_message(self, msg):
 
-        # ---- UDP chunk reassembly ----
+        # ---- UDP reassembly ----
         if msg.get("chunked"):
             cid = msg["chunk_id"]
             if cid not in self.chunk_buffer:
@@ -113,7 +124,7 @@ class Node:
 
         t = msg.get("type")
 
-        # ---- coordinator ----
+        # ---- Coordinator ----
         if t == "PEER_UPDATE":
             self.peers = msg["peers"]
             self.node_id = msg["node_id"]
@@ -148,7 +159,7 @@ class Node:
                 self.opti_buffer.append(msg)
 
     # =========================
-    # SERVER LOOP
+    # SERVERS
     # =========================
     def start_server(self, port):
         threading.Thread(target=self._tcp_server, args=(port,), daemon=True).start()
@@ -158,6 +169,8 @@ class Node:
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.bind(("0.0.0.0", port))
         server.listen()
+
+        print(f"[Node] TCP server listening on {port}")
 
         while True:
             conn, _ = server.accept()
@@ -175,14 +188,16 @@ class Node:
                     msg = pickle.loads(data)
                     self.handle_message(msg)
 
-            except:
-                pass
+            except Exception as e:
+                print(f"[TCP RECV ERROR] {e}")
 
             conn.close()
 
     def _udp_server(self, port):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(("0.0.0.0", port))
+
+        print(f"[Node] UDP server listening on {port}")
 
         while True:
             data, _ = sock.recvfrom(65535)
@@ -191,6 +206,25 @@ class Node:
                 self.handle_message(msg)
             except:
                 pass
+
+    # =========================
+    # COORDINATOR REGISTER
+    # =========================
+    def register(self):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.connect((COORDINATOR_IP, COORDINATOR_PORT))
+
+            msg = {
+                "type": "REGISTER",
+                "port": PORT
+            }
+
+            sock.sendall(pickle.dumps(msg))
+            sock.close()
+
+        except Exception as e:
+            print(f"[Register Error] {e}")
 
     # =========================
     # RUN EXPERIMENT
@@ -226,3 +260,36 @@ class Node:
                 time.sleep(0.01)
 
             print(f"[FINAL] {self.algo} latency = {time.time() - self.start_time:.4f}s")
+
+
+# =========================
+# MAIN
+# =========================
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python node.py [tcp|udp]")
+        return
+
+    mode = sys.argv[1]
+    if mode not in ["tcp", "udp"]:
+        print("Mode must be 'tcp' or 'udp'")
+        return
+
+    node = Node(mode)
+
+    # start servers
+    node.start_server(PORT)
+
+    # register to coordinator
+    time.sleep(1)
+    node.register()
+
+    print(f"[Node] Running in {mode.upper()} mode")
+
+    # keep alive
+    while True:
+        time.sleep(10)
+
+
+if __name__ == "__main__":
+    main()

@@ -13,9 +13,12 @@ from optireduce import run_optireduce
 from noise import Noise
 from globals import *
 
+MAX_CHUNK_SIZE = 1200
+UDP_TIMEOUT = 30
+
 
 # =========================
-# TCP helper
+# TCP helpers
 # =========================
 def recv_exact(sock, size):
     data = b''
@@ -34,21 +37,17 @@ class Node:
         self.node_id = None
         self.num_nodes = None
 
-        self.local_matrix = None
-        self.done_count = 0
         self.lock = threading.Lock()
-
-        self.algo = None
-        self.start_time = None
+        self.done_count = 0
 
         self.noise = Noise()
 
-        # buffers
         self.ring_buffer = []
         self.opti_buffer = []
         self.received = []
         self.chunk_buffer = {}
-        self.final_result = None
+
+        self.start_time = None
 
     # =========================
     # SEND
@@ -64,28 +63,30 @@ class Node:
         if mode == "tcp":
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5)
                 sock.connect((ip, port))
-
-                # length-prefixed framing
                 sock.sendall(len(data).to_bytes(4, 'big') + data)
                 sock.close()
-
             except Exception as e:
-                print(f"[TCP ERROR] {e}")
-
+                print(f"[TCP SEND ERROR] {e}")
         else:
             self._send_chunked(ip, port, data)
 
+
     def _send_chunked(self, ip, port, data):
         chunk_id = str(uuid.uuid4())
-        chunk_size = MAX_CHUNK_SIZE
-        total = (len(data) + chunk_size - 1) // chunk_size
+        size = MAX_CHUNK_SIZE
+        total = (len(data) + size - 1) // size
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
+        # ✅ increase buffer (IMPORTANT)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
+        except:
+            pass
+
         for i in range(total):
-            chunk = data[i * chunk_size:(i + 1) * chunk_size]
+            chunk = data[i * size:(i + 1) * size]
             msg = {
                 "chunked": True,
                 "chunk_id": chunk_id,
@@ -93,16 +94,31 @@ class Node:
                 "num_chunks": total,
                 "payload": chunk
             }
-            sock.sendto(pickle.dumps(msg), (ip, port))
+
+            payload = pickle.dumps(msg)
+
+            # ✅ retry loop for buffer full
+            while True:
+                try:
+                    sock.sendto(payload, (ip, port))
+                    break
+                except OSError as e:
+                    if e.errno == 55:  # No buffer space
+                        time.sleep(0.001)  # ✅ backoff (critical)
+                    else:
+                        raise
+
+            # ✅ pacing (VERY IMPORTANT)
+            time.sleep(0.0005)
 
         sock.close()
 
     # =========================
-    # RECEIVE HANDLER
+    # RECEIVE
     # =========================
     def handle_message(self, msg):
 
-        # ---- UDP reassembly ----
+        # UDP reassembly
         if msg.get("chunked"):
             cid = msg["chunk_id"]
             if cid not in self.chunk_buffer:
@@ -111,22 +127,27 @@ class Node:
             self.chunk_buffer[cid][msg["chunk_idx"]] = msg["payload"]
 
             if len(self.chunk_buffer[cid]) == msg["num_chunks"]:
-                full = b''.join(
-                    self.chunk_buffer[cid][i]
-                    for i in range(msg["num_chunks"])
-                )
+                full = b''.join(self.chunk_buffer[cid][i] for i in range(msg["num_chunks"]))
                 del self.chunk_buffer[cid]
                 self.handle_message(pickle.loads(full))
             return
 
         t = msg.get("type")
 
-        # ---- Coordinator ----
+        # ===== PEER UPDATE =====
         if t == "PEER_UPDATE":
             self.peers = msg["peers"]
             self.node_id = msg["node_id"]
             self.num_nodes = len(msg["peers"])
-            print(f"[Node {self.node_id}] Ready ({self.num_nodes} nodes)")
+
+            print("\n" + "="*50)
+            print(f"[Node {self.node_id}] Joined cluster")
+            print(f"[Node {self.node_id}] Total nodes: {self.num_nodes}")
+            print(f"[Node {self.node_id}] Peers:")
+            for i, (ip, port) in enumerate(self.peers):
+                tag = " (ME)" if i == self.node_id else ""
+                print(f"   - Node {i}: {ip}:{port}{tag}")
+            print("="*50 + "\n")
 
         elif t == "START":
             threading.Thread(target=self.run_experiment, args=(msg,), daemon=True).start()
@@ -135,7 +156,7 @@ class Node:
             with self.lock:
                 self.done_count += 1
 
-        # ---- PS ----
+        # ===== PS =====
         elif msg.get("algo") == "ps":
             if msg.get("phase") == "push":
                 with self.lock:
@@ -143,14 +164,13 @@ class Node:
 
             elif msg.get("phase") == "pop":
                 print("[PS] Received results")
-                self.final_result = np.array(msg["payload"])
 
-        # ---- Ring ----
+        # ===== RING =====
         elif msg.get("algo") == "ring":
             with self.lock:
                 self.ring_buffer.append(msg)
 
-        # ---- OptiReduce ----
+        # ===== OPTIREDUCE =====
         elif msg.get("algo") == "optireduce":
             with self.lock:
                 self.opti_buffer.append(msg)
@@ -163,41 +183,40 @@ class Node:
         threading.Thread(target=self._udp_server, args=(port,), daemon=True).start()
 
     def _tcp_server(self, port):
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(("0.0.0.0", port))
-    server.listen()
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("0.0.0.0", port))
+        server.listen()
 
-    print(f"[Node] TCP server listening on {port}")
+        print(f"[Node] TCP server listening on {port}")
 
-    while True:
-        conn, _ = server.accept()
+        while True:
+            conn, _ = server.accept()
 
-        try:
-            length_bytes = recv_exact(conn, 4)
-            if not length_bytes:
-                conn.close()
-                continue
+            try:
+                # try length-prefixed first
+                length_bytes = conn.recv(4)
 
-            length = int.from_bytes(length_bytes, 'big')
+                if not length_bytes:
+                    conn.close()
+                    continue
 
-            # sanity check (optional but good)
-            if length <= 0 or length > 10_000_000:
-                print(f"[TCP ERROR] Invalid length: {length}")
-                conn.close()
-                continue
+                # If length looks invalid → fallback (coordinator case)
+                length = int.from_bytes(length_bytes, 'big')
 
-            data = recv_exact(conn, length)
-            if not data:
-                conn.close()
-                continue
+                if length <= 0 or length > 10_000_000:
+                    # fallback: treat entire stream as raw pickle
+                    data = length_bytes + conn.recv(65535)
+                    msg = pickle.loads(data)
+                else:
+                    data = recv_exact(conn, length)
+                    msg = pickle.loads(data)
 
-            msg = pickle.loads(data)
-            self.handle_message(msg)
+                self.handle_message(msg)
 
-        except Exception as e:
-            print(f"[TCP RECV ERROR] {e}")
+            except Exception as e:
+                print(f"[TCP RECV ERROR] {e}")
 
-        conn.close()
+            conn.close()
 
     def _udp_server(self, port):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -214,18 +233,14 @@ class Node:
                 pass
 
     # =========================
-    # COORDINATOR REGISTER
+    # COORDINATOR
     # =========================
     def register(self):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((COORDINATOR_IP, COORDINATOR_PORT))
 
-            msg = {
-                "type": "REGISTER",
-                "port": PORT
-            }
-
+            msg = {"type": "REGISTER", "port": PORT}
             sock.sendall(pickle.dumps(msg))
             sock.close()
 
@@ -233,29 +248,28 @@ class Node:
             print(f"[Register Error] {e}")
 
     # =========================
-    # RUN EXPERIMENT
+    # EXPERIMENT
     # =========================
     def run_experiment(self, msg):
-        self.algo = msg["algo"]
+        algo = msg["algo"]
         size = msg["size"]
 
-        print(f"[Node {self.node_id}] START {self.algo}")
+        print(f"\n[Node {self.node_id}] ===== START {algo.upper()} =====")
+        print(f"[Node {self.node_id}] Matrix size: {size}")
 
-        self.local_matrix = generate_matrix(size)
-        grad = np.tanh(self.local_matrix)
+        grad = np.tanh(generate_matrix(size))
 
         if self.node_id == 0:
             self.done_count = 0
             self.start_time = time.time()
 
-        if self.algo == "ps":
+        if algo == "ps":
             run_ps(self, grad)
-        elif self.algo == "ring":
+        elif algo == "ring":
             run_ring(self, grad)
-        elif self.algo == "optireduce":
+        elif algo == "optireduce":
             run_optireduce(self, grad)
 
-        # ---- finish ----
         if self.node_id != 0:
             self.send(self.peers[0][0], self.peers[0][1], {"type": "DONE"})
         else:
@@ -265,7 +279,41 @@ class Node:
             while self.done_count < self.num_nodes:
                 time.sleep(0.01)
 
-            print(f"[FINAL] {self.algo} latency = {time.time() - self.start_time:.4f}s")
+            print("\n" + "="*50)
+            print(f"[RESULT] Algorithm: {algo}")
+            latency_ms = (time.time() - self.start_time) * 1000
+            print(f"[RESULT] Latency: {latency_ms:.2f} ms")
+            print("="*50 + "\n")
+
+    # =========================
+    # CLI
+    # =========================
+    def cli(self):
+        while True:
+            try:
+                cmd = input("\nCommand (start [ps|ring|optireduce] size): ").strip()
+                parts = cmd.split()
+
+                if len(parts) == 3 and parts[0] == "start":
+                    if self.node_id != 0:
+                        print("[ERROR] Only Node 0 can start")
+                        continue
+
+                    algo = parts[1]
+                    size = int(parts[2])
+
+                    msg = {"type": "START", "algo": algo, "size": size}
+
+                    print(f"[Node 0] Broadcasting {algo}")
+
+                    for ip, port in self.peers:
+                        self.send(ip, port, msg)
+
+                else:
+                    print("Invalid command")
+
+            except Exception as e:
+                print(f"[CLI ERROR] {e}")
 
 
 # =========================
@@ -277,24 +325,21 @@ def main():
         return
 
     mode = sys.argv[1]
-    if mode not in ["tcp", "udp"]:
-        print("Mode must be 'tcp' or 'udp'")
-        return
 
     node = Node(mode)
-
-    # start servers
     node.start_server(PORT)
 
-    # register to coordinator
     time.sleep(1)
     node.register()
 
     print(f"[Node] Running in {mode.upper()} mode")
+    print("\nCommands:")
+    print("  start ps <size>")
+    print("  start ring <size>")
+    print("  start optireduce <size>")
+    print("Only Node 0 can start experiments.\n")
 
-    # keep alive
-    while True:
-        time.sleep(10)
+    node.cli()
 
 
 if __name__ == "__main__":

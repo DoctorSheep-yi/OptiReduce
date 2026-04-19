@@ -1,5 +1,6 @@
 import numpy as np
 import time
+from globals import *
 
 def run_ps(node, grad):
     if node.node_id == 0:

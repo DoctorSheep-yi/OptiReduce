@@ -61,7 +61,7 @@ class Node:
 
     def broadcast(self, msg):
         for i, (ip, port) in enumerate(self.peers):
-            if i != self.node_id: self.send(ip, port, msg, force_mode="tcp")
+            if i != self.node_id: self.send(ip, port, msg, force_mode=None)
 
     def handle_message(self, msg):
         if msg.get("chunked"):
@@ -115,7 +115,7 @@ class Node:
         elif self.algo == "optireduce": run_optireduce(self, grad)
 
         if self.node_id != 0:
-            self.send(self.peers[0][0], self.peers[0][1], {"type": "DONE"}, force_mode="tcp")
+            self.send(self.peers[0][0], self.peers[0][1], {"type": "DONE"}, force_mode=None)
         else:
             with self.lock: self.done_count += 1
             while self.done_count < self.num_nodes: time.sleep(0.01)

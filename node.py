@@ -12,10 +12,6 @@ from optireduce import run_optireduce
 from noise import Noise
 from globals import *
 
-COORDINATOR_IP = "172.21.102.115"
-COORDINATOR_PORT = 8000
-PORT = 9000
-
 class Node:
     def __init__(self, mode):
         self.mode = mode

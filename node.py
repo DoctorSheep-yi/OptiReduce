@@ -13,9 +13,6 @@ from optireduce import run_optireduce
 from noise import Noise
 from globals import *
 
-MAX_CHUNK_SIZE = 1200
-UDP_TIMEOUT = 30  # seconds (change to 300 for 5 min)
-
 
 # =========================
 # TCP helper
@@ -166,32 +163,41 @@ class Node:
         threading.Thread(target=self._udp_server, args=(port,), daemon=True).start()
 
     def _tcp_server(self, port):
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.bind(("0.0.0.0", port))
-        server.listen()
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("0.0.0.0", port))
+    server.listen()
 
-        print(f"[Node] TCP server listening on {port}")
+    print(f"[Node] TCP server listening on {port}")
 
-        while True:
-            conn, _ = server.accept()
+    while True:
+        conn, _ = server.accept()
 
-            try:
-                length_bytes = conn.recv(4)
-                if not length_bytes:
-                    conn.close()
-                    continue
+        try:
+            length_bytes = recv_exact(conn, 4)
+            if not length_bytes:
+                conn.close()
+                continue
 
-                length = int.from_bytes(length_bytes, 'big')
-                data = recv_exact(conn, length)
+            length = int.from_bytes(length_bytes, 'big')
 
-                if data:
-                    msg = pickle.loads(data)
-                    self.handle_message(msg)
+            # sanity check (optional but good)
+            if length <= 0 or length > 10_000_000:
+                print(f"[TCP ERROR] Invalid length: {length}")
+                conn.close()
+                continue
 
-            except Exception as e:
-                print(f"[TCP RECV ERROR] {e}")
+            data = recv_exact(conn, length)
+            if not data:
+                conn.close()
+                continue
 
-            conn.close()
+            msg = pickle.loads(data)
+            self.handle_message(msg)
+
+        except Exception as e:
+            print(f"[TCP RECV ERROR] {e}")
+
+        conn.close()
 
     def _udp_server(self, port):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

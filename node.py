@@ -270,15 +270,7 @@ class Node:
         elif algo == "optireduce":
             run_optireduce(self, grad)
 
-        if self.node_id != 0:
-            self.send(self.peers[0][0], self.peers[0][1], {"type": "DONE"})
-        else:
-            with self.lock:
-                self.done_count += 1
-
-            while self.done_count < self.num_nodes:
-                time.sleep(0.01)
-
+        if self.node_id == 0:
             print("\n" + "="*50)
             print(f"[RESULT] Algorithm: {algo}")
             latency_ms = (time.time() - self.start_time) * 1000

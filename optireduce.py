@@ -1,5 +1,6 @@
 import numpy as np
 import time
+from globals import *
 
 def run_optireduce(node, grad):
     n = node.num_nodes

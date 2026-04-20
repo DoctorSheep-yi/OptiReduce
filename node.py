@@ -52,6 +52,8 @@ class Node:
     # SEND
     # =========================
     def send(self, ip, port, msg, force_mode=None):
+        start = time.time()
+
         mode = force_mode if force_mode else self.mode
 
         if mode == "udp" and self.noise.should_drop_udp():
@@ -63,7 +65,6 @@ class Node:
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-                # ✅ increase buffer (important for large matrices)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, TCP_BUFFER_SIZE)
 
                 sock.connect((ip, port))
@@ -73,6 +74,8 @@ class Node:
                 print(f"[TCP SEND ERROR] {e}")
         else:
             self._send_chunked(ip, port, data)
+
+        self.comm_time += time.time() - start
 
 
     def _send_chunked(self, ip, port, data):
@@ -119,6 +122,8 @@ class Node:
     # RECEIVE
     # =========================
     def handle_message(self, msg):
+        start = time.time()
+
         # UDP reassembly
         if msg.get("chunked"):
             cid = msg["chunk_id"]
@@ -135,7 +140,6 @@ class Node:
 
         t = msg.get("type")
 
-        # ===== PEER UPDATE =====
         if t == "PEER_UPDATE":
             self.peers = msg["peers"]
             self.node_id = msg["node_id"]
@@ -152,9 +156,8 @@ class Node:
 
         elif t == "START":
             threading.Thread(target=self.run_experiment, args=(msg,), daemon=True).start()
-        
+
         elif t == "REPORT":
-            # Node 0 collects these to calculate global accuracy
             with self.lock:
                 self.report_buffer.append(msg)
 
@@ -162,24 +165,22 @@ class Node:
             with self.lock:
                 self.done_count += 1
 
-        # ===== PS =====
         elif msg.get("algo") == "ps":
             if msg.get("phase") == "push":
                 with self.lock:
                     self.received.append(msg["payload"])
-
             elif msg.get("phase") == "pop":
                 print("[PS] Received results")
 
-        # ===== RING =====
         elif msg.get("algo") == "ring":
             with self.lock:
                 self.ring_buffer.append(msg)
 
-        # ===== OPTIREDUCE =====
         elif msg.get("algo") == "optireduce":
             with self.lock:
                 self.opti_buffer.append(msg)
+
+        self.comm_time += time.time() - start
 
     # =========================
     # SERVERS
@@ -254,6 +255,9 @@ class Node:
             self.chunk_buffer = {}
 
     def run_experiment(self, msg):
+        self.comp_time = 0
+        self.comm_time = 0
+        self.start_time = time.time()
         algo = msg["algo"]
         size = msg["size"]
 
@@ -298,6 +302,13 @@ class Node:
             latency_ms = (time.time() - self.start_time) * 1000
             print(f"[RESULT] Latency: {latency_ms:.2f} ms")
             print("=" * 50 + "\n")
+        total_time = time.time() - self.start_time
+
+        print("\n================ RESULT ================")
+        print(f"Total Time        : {total_time*1000:.2f} ms")
+        print(f"Communication Time: {self.comm_time*1000:.2f} ms")
+        print(f"Computation Time  : {self.comp_time*1000:.2f} ms")
+        print("========================================\n")
 
 
     def calculate_accuracy(self, latency, size):

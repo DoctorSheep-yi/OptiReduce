@@ -67,7 +67,7 @@ def topk_sparsify(x, ratio=0.1):
 
 def run_optireduce(node, grad):
     UDP_TIMEOUT_SHORT = 1
-    UDP_TIMEOUT_long = max(30, node.node_matrix_size/50)  # seconds, scaled with matrix size
+    UDP_TIMEOUT_LONG = max(30, node.node_matrix_size/50)  # seconds, scaled with matrix size
     n = node.num_nodes
     my_id = node.node_id
 
@@ -77,7 +77,9 @@ def run_optireduce(node, grad):
 
     # ===== Hadamard encode =====
     padded, original_len = pad_to_power_of_two(flat_grad)
+    start_comp = time.time()
     encoded = hadamard_transform(padded)
+    node.comp_time += time.time() - start_comp
 
     # ===== Split =====
     shards = np.array_split(encoded, n)
@@ -121,7 +123,9 @@ def run_optireduce(node, grad):
                         break
 
         if found is not None:
+            start_comp = time.time()
             local_piece += found
+            node.comp_time += time.time() - start_comp
             received += 1
         else:
             time.sleep(0.001)
@@ -181,7 +185,9 @@ def run_optireduce(node, grad):
     full_encoded = full_encoded / max(1, effective_nodes)
 
     # ===== Decode =====
-    decoded = inverse_hadamard_transform(full_encoded)
+    start_comp = time.time()
+    decoded = inverse_hadamard_transform(result)
+    node.comp_time += time.time() - start_comp
     decoded = decoded[:original_len]
 
     approx = decoded.reshape(grad.shape)

@@ -53,8 +53,11 @@ def run_ring(node, grad):
 
             time.sleep(0.001)
 
+        # ✅ ONLY ADDITION: computation timing
+        start_comp = time.time()
         target_idx = (node.node_id - step - 1) % n
         shards[target_idx] += incoming
+        node.comp_time += time.time() - start_comp
 
     # =========================
     # ALL-GATHER
@@ -96,7 +99,7 @@ def run_ring(node, grad):
             time.sleep(0.001)
 
         target_idx = (node.node_id - step) % n
-        shards[target_idx] = incoming
+        shards[target_idx] = incoming  # ❗ no computation here (just assignment)
 
     print(f"[Node {node.node_id}] Ring completed")
 

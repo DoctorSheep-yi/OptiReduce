@@ -276,19 +276,19 @@ class Node:
             approx_res, original = run_optireduce(self, grad)
             latency = (time.time() - self.start_time) * 1000
 
-            # Send report to Node 0 (reliable)
-            report = {
-                "type": "REPORT",
-                "node_id": self.node_id,
-                "approx": approx_res,
-                "truth": original
-            }
+            # # Send report to Node 0 (reliable)
+            # report = {
+            #     "type": "REPORT",
+            #     "node_id": self.node_id,
+            #     "approx": approx_res,
+            #     "truth": original
+            # }
 
-            self.send(self.peers[0][0], self.peers[0][1], report, force_mode="tcp")
+            # self.send(self.peers[0][0], self.peers[0][1], report, force_mode="tcp")
 
-            # Node 0 computes accuracy
-            if self.node_id == 0:
-                self.calculate_accuracy(latency, size)
+            # # Node 0 computes accuracy
+            # if self.node_id == 0:
+            #     self.calculate_accuracy(latency, size)
 
         if self.node_id == 0:
             print("\n" + "=" * 50)

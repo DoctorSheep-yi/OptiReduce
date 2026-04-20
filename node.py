@@ -63,6 +63,10 @@ class Node:
         if mode == "tcp":
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+                # ✅ increase buffer (important for large matrices)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
+
                 sock.connect((ip, port))
                 sock.sendall(len(data).to_bytes(4, 'big') + data)
                 sock.close()
@@ -79,7 +83,6 @@ class Node:
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-        # ✅ increase buffer (IMPORTANT)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
         except:
@@ -97,18 +100,18 @@ class Node:
 
             payload = pickle.dumps(msg)
 
-            # ✅ retry loop for buffer full
+            
             while True:
                 try:
                     sock.sendto(payload, (ip, port))
                     break
                 except OSError as e:
                     if e.errno == 55:  # No buffer space
-                        time.sleep(0.001)  # ✅ backoff (critical)
+                        time.sleep(0.001)  
                     else:
                         raise
 
-            # ✅ pacing (VERY IMPORTANT)
+            
             time.sleep(0.0005)
 
         sock.close()
@@ -193,23 +196,38 @@ class Node:
             conn, _ = server.accept()
 
             try:
-                # try length-prefixed first
-                length_bytes = conn.recv(4)
+                # MUST read exactly 4 bytes
+                length_bytes = recv_exact(conn, 4)
 
                 if not length_bytes:
                     conn.close()
                     continue
 
-                # If length looks invalid → fallback (coordinator case)
-                length = int.from_bytes(length_bytes, 'big')
+                try:
+                    length = int.from_bytes(length_bytes, 'big')
 
-                if length <= 0 or length > 10_000_000:
-                    # fallback: treat entire stream as raw pickle
-                    data = length_bytes + conn.recv(65535)
-                    msg = pickle.loads(data)
-                else:
-                    data = recv_exact(conn, length)
-                    msg = pickle.loads(data)
+                    if 0 < length < 100_000_000:
+                        # safe full read
+                        data = recv_exact(conn, length)
+                        if data is None:
+                            conn.close()
+                            continue
+
+                        msg = pickle.loads(data)
+
+                    else:
+                        raise ValueError("Invalid length")
+
+                except:
+                    # fallback: coordinator raw pickle
+                    try:
+                        remaining = conn.recv(65535)
+                        data = length_bytes + remaining
+                        msg = pickle.loads(data)
+                    except Exception as e:
+                        print(f"[TCP RECV ERROR] {e}")
+                        conn.close()
+                        continue
 
                 self.handle_message(msg)
 

@@ -4,7 +4,5 @@ COORDINATOR_PORT = 8000
 PORT = 9000
 
 UDP_TIMEOUT = 120  # 120s
-UDP_TIMEOUT_SHORT = 1  # 1s for internal waits
-UDP_TIMEOUT_LONG = 30  # 30s for final waits (e.g. waiting for all-gather in optireduce)
 MAX_CHUNK_SIZE = 1200
 TCP_BUFFER_SIZE = 256 * 1024 * 1024

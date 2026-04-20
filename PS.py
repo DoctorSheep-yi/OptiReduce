@@ -22,16 +22,16 @@ def run_ps(node, grad):
 
             time.sleep(0.001)
 
-        result = np.sum([np.array(g) for g in node.received], axis=0)
+        result = np.sum(node.received, axis=0)
         print("[PS] Aggregation done")
 
         for i in range(1, node.num_nodes):
             node.send(node.peers[i][0], node.peers[i][1],
-                      {"algo": "ps", "phase": "pop", "payload": result.tolist()})
+                      {"algo": "ps", "phase": "pop", "payload": result})
 
         return result
 
     else:
         node.send(node.peers[0][0], node.peers[0][1],
-                  {"algo": "ps", "phase": "push", "payload": grad.tolist()})
+                  {"algo": "ps", "phase": "push", "payload": grad})
         return grad

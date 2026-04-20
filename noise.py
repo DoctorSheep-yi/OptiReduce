@@ -79,4 +79,6 @@ class Noise:
         subprocess.call(["sudo", "tc", "qdisc", "add", "dev", "eth0", "root", "netem", "loss", loss])
 
     def clear_tc(self):
+        if not self.enable_tcp_loss:
+            return
         subprocess.call(["sudo", "tc", "qdisc", "del", "dev", "eth0", "root"], stderr=subprocess.DEVNULL)

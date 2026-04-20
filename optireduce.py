@@ -67,7 +67,7 @@ def topk_sparsify(x, ratio=0.1):
 
 def run_optireduce(node, grad):
     UDP_TIMEOUT_SHORT = 1
-    UDP_TIMEOUT_LONG = max(30, node.node_matrix_size/50)
+    UDP_TIMEOUT_LONG = 50
     n = node.num_nodes
     my_id = node.node_id
 

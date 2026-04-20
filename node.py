@@ -281,7 +281,7 @@ class Node:
             self.noise.cpu_stress = False
             self.noise.cpu_workers = 4
 
-            self.noise.enable_tcp_loss = True
+            self.noise.enable_tcp_loss = False
             self.noise.apply_packet_loss_tc("5%")
         else:
             self.noise.enable_straggler = False

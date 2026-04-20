@@ -276,7 +276,7 @@ class Node:
         # =========================
         if self.node_id == 0:
             self.noise.enable_straggler = True
-            self.noise.sleep_time = 0.02
+            self.noise.sleep_time = self.node_matrix_size * 0.003  # Straggler delay scales with size
 
             self.noise.cpu_stress = True
             self.noise.cpu_workers = 4

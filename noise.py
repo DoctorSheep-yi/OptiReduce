@@ -4,6 +4,12 @@ import subprocess
 from multiprocessing import Process
 
 
+def _burn_cpu_worker():
+    while True:
+        x = 0
+        for _ in range(10_000_000_000):
+            x += 1
+
 class Noise:
     def __init__(self):
         self.enable_straggler = False
@@ -23,6 +29,7 @@ class Noise:
     # =========================
     def apply_straggler(self):
         if self.enable_straggler:
+            print(f"[Noise] Applying straggler delay of {self.sleep_time:.2f}s")
             time.sleep(self.sleep_time)
 
     # =========================
@@ -41,12 +48,14 @@ class Noise:
         self._stress_processes = []
 
         for _ in range(self.cpu_workers):
-            p = Process(target=self._burn_cpu)
+            print("[Noise] Starting CPU stress worker")
+            p = Process(target=_burn_cpu_worker)
             p.daemon = True
             p.start()
             self._stress_processes.append(p)
 
     def stop_cpu_stress(self):
+        print("[Noise] Stopping CPU stress workers")
         for p in self._stress_processes:
             p.terminate()
         self._stress_processes = []

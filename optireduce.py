@@ -26,7 +26,7 @@ def run_optireduce(node, grad):
     start = time.time()
 
     while received < (n - 1):
-        if time.time() - start > UDP_TIMEOUT:
+        if time.time() - start > UDP_TIMEOUT_SHORT:
             print("[OptiReduce] UDP timeout during shard phase")
             break
 
@@ -65,7 +65,7 @@ def run_optireduce(node, grad):
     start = time.time()
 
     while len(final_shards) < n:
-        if time.time() - start > UDP_TIMEOUT:
+        if time.time() - start > UDP_TIMEOUT_SHORT:
             print("[OptiReduce] UDP timeout during gather phase")
             break
 

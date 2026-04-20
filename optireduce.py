@@ -102,8 +102,9 @@ def run_optireduce(node, grad):
         with node.lock:
             for i, msg in enumerate(node.opti_buffer):
                 if msg.get("phase") == "shard" and msg.get("shard_id") == my_id:
-                    if msg["payload"].shape == local_piece.shape:
-                        found = msg["payload"]
+                    payload = np.array(msg["payload"])   # ✅ convert first
+                    if payload.shape == local_piece.shape:
+                        found = payload
                         node.opti_buffer.pop(i)
                         break
 
@@ -138,10 +139,15 @@ def run_optireduce(node, grad):
 
     # ===== Reconstruct encoded vector =====
     full_encoded = []
-    shard_template = np.array_split(np.zeros_like(encoded), n)
 
     for i in range(n):
-        full_encoded.append(final_shards.get(i, shard_template[i]))
+        shard = final_shards.get(i, shards[i])
+
+        # ✅ convert list → numpy (CRITICAL FIX)
+        if isinstance(shard, list):
+            shard = np.array(shard)
+
+        full_encoded.append(shard)
 
     full_encoded = np.concatenate(full_encoded)
 

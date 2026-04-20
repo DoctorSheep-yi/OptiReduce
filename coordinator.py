@@ -25,9 +25,9 @@ def broadcast():
                 "peers": nodes
             }
 
-            sock.sendall(pickle.dumps(msg))
+            data = pickle.dumps(msg)
+            sock.sendall(len(data).to_bytes(4, 'big') + data)
             sock.close()
-
         except Exception as e:
             print(f"[Coordinator] Failed to send to {ip}:{port}: {e}")
 

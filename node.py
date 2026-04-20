@@ -187,51 +187,23 @@ class Node:
         server.bind(("0.0.0.0", port))
         server.listen()
 
-        print(f"[Node] TCP server listening on {port}")
-
         while True:
             conn, _ = server.accept()
-
             try:
-                # MUST read exactly 4 bytes
                 length_bytes = recv_exact(conn, 4)
-
                 if not length_bytes:
-                    conn.close()
                     continue
 
-                try:
-                    length = int.from_bytes(length_bytes, 'big')
-
-                    if 0 < length < 1_000_000_000:
-                        # safe full read
-                        data = recv_exact(conn, length)
-                        if data is None:
-                            conn.close()
-                            continue
-
+                length = int.from_bytes(length_bytes, 'big')
+                if 0 < length < 1_000_000_000:
+                    data = recv_exact(conn, length)
+                    if data:
                         msg = pickle.loads(data)
-
-                    else:
-                        raise ValueError("Invalid length")
-
-                except:
-                    # fallback: coordinator raw pickle
-                    try:
-                        remaining = conn.recv(65535)
-                        data = length_bytes + remaining
-                        msg = pickle.loads(data)
-                    except Exception as e:
-                        print(f"[TCP RECV ERROR] {e}")
-                        conn.close()
-                        continue
-
-                self.handle_message(msg)
-
+                        self.handle_message(msg)
             except Exception as e:
                 print(f"[TCP RECV ERROR] {e}")
-
-            conn.close()
+            finally:
+                conn.close()
 
     def _udp_server(self, port):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -256,9 +228,10 @@ class Node:
             sock.connect((COORDINATOR_IP, COORDINATOR_PORT))
 
             msg = {"type": "REGISTER", "port": PORT}
-            sock.sendall(pickle.dumps(msg))
+            data = pickle.dumps(msg)
+            # ✅ Consistency: Prepend length even for registration
+            sock.sendall(len(data).to_bytes(4, 'big') + data)
             sock.close()
-
         except Exception as e:
             print(f"[Register Error] {e}")
 

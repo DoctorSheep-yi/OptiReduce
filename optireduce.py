@@ -1,14 +1,20 @@
-# optireduce.py
 import numpy as np
 import time
 from globals import *
 
-def hadamard_transform(x):
-    """Fast Walsh-Hadamard Transform (FWHT), in-place"""
-    h = 1
-    x = x.copy()
-    n = len(x)
 
+# =========================
+# Utilities
+# =========================
+
+def next_power_of_two(n):
+    return 1 << (n - 1).bit_length()
+
+
+def fwht(x):
+    """In-place Fast Walsh–Hadamard Transform"""
+    h = 1
+    n = len(x)
     while h < n:
         for i in range(0, n, h * 2):
             for j in range(i, i + h):
@@ -17,23 +23,47 @@ def hadamard_transform(x):
                 x[j] = a + b
                 x[j + h] = a - b
         h *= 2
+    return x
 
+
+def hadamard_transform(x):
+    """Normalized Hadamard"""
+    x = x.copy()
+    fwht(x)
+    x /= np.sqrt(len(x))   # ✅ FIX
     return x
 
 
 def inverse_hadamard_transform(x):
-    """Inverse FWHT"""
-    n = len(x)
-    return hadamard_transform(x) / n
+    """Inverse = same transform"""
+    x = x.copy()
+    fwht(x)
+    x /= np.sqrt(len(x))   # ✅ FIX
+    return x
+
 
 def pad_to_power_of_two(x):
     n = len(x)
-    next_pow2 = 1 << (n - 1).bit_length()
-    if next_pow2 == n:
+    n2 = next_power_of_two(n)
+    if n2 == n:
         return x, n
-    padded = np.zeros(next_pow2, dtype=x.dtype)
+    padded = np.zeros(n2, dtype=x.dtype)
     padded[:n] = x
     return padded, n
+
+
+def topk_sparsify(x, ratio=0.1):
+    """Keep top-k magnitude values"""
+    k = max(1, int(len(x) * ratio))
+    idx = np.argsort(np.abs(x))[-k:]
+    out = np.zeros_like(x)
+    out[idx] = x[idx]
+    return out
+
+
+# =========================
+# MAIN OPTIREDUCE
+# =========================
 
 def run_optireduce(node, grad):
     n = node.num_nodes
@@ -45,6 +75,10 @@ def run_optireduce(node, grad):
     padded, original_len = pad_to_power_of_two(flat_grad)
     encoded = hadamard_transform(padded)
 
+    # ===== Compression (KEY FIX) =====
+    encoded = topk_sparsify(encoded, ratio=0.1)
+
+    # ===== Split =====
     shards = np.array_split(encoded, n)
     local_piece = shards[my_id].copy()
 
@@ -79,8 +113,6 @@ def run_optireduce(node, grad):
         else:
             time.sleep(0.001)
 
-    # 🚫 NO SCALING (important fix)
-
     # ===== Phase 2: All-gather =====
     for i in range(n):
         if i == my_id:
@@ -113,14 +145,13 @@ def run_optireduce(node, grad):
 
     full_encoded = np.concatenate(full_encoded)
 
-    # ===== Normalize (average of received pieces) =====
+    # ===== Average =====
     effective_nodes = received + 1
     full_encoded = full_encoded / max(1, effective_nodes)
 
-    # ===== Hadamard decode =====
+    # ===== Decode =====
     decoded = inverse_hadamard_transform(full_encoded)
 
-    # Remove padding
     decoded = decoded[:original_len]
 
     approx = decoded.reshape(grad.shape)

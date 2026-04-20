@@ -14,6 +14,7 @@ class Noise:
     def __init__(self):
         self.enable_straggler = False
         self.enable_udp_loss = False
+        self.enable_tcp_loss = False
 
         self.udp_loss_rate = 0.05
         self.sleep_time = 0.0
@@ -72,6 +73,8 @@ class Noise:
     # SYSTEM LOSS (tc)
     # =========================
     def apply_packet_loss_tc(self, loss="5%"):
+        if not self.enable_tcp_loss:
+            return
         subprocess.call(["sudo", "tc", "qdisc", "del", "dev", "eth0", "root"], stderr=subprocess.DEVNULL)
         subprocess.call(["sudo", "tc", "qdisc", "add", "dev", "eth0", "root", "netem", "loss", loss])
 

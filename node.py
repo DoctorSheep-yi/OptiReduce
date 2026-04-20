@@ -275,11 +275,14 @@ class Node:
         # STRAGGLER CONFIG (ONLY ONE NODE)
         # =========================
         if self.node_id == 0:
-            self.noise.enable_straggler = True
+            self.noise.enable_straggler = False
             self.noise.sleep_time = self.node_matrix_size * 0.003  # Straggler delay scales with size
 
-            self.noise.cpu_stress = True
+            self.noise.cpu_stress = False
             self.noise.cpu_workers = 4
+
+            self.noise.enable_tcp_loss = True
+            self.noise.apply_packet_loss_tc("5%")
         else:
             self.noise.enable_straggler = False
             self.noise.cpu_stress = False
@@ -296,23 +299,24 @@ class Node:
 
         elif algo == "optireduce":
             approx_res, original = run_optireduce(self, grad)
-            # latency = (time.time() - self.start_time) * 1000
+            latency = (time.time() - self.start_time) * 1000
+        
+            # Send report to Node 0 (reliable)
+            report = {
+                "type": "REPORT",
+                "node_id": self.node_id,
+                "approx": approx_res,
+                "truth": original
+            }
+
+            self.send(self.peers[0][0], self.peers[0][1], report, force_mode="tcp")
+
+            # Node 0 computes accuracy
+            if self.node_id == 0:
+                self.calculate_accuracy(latency, size)
 
         self.noise.stop_cpu_stress()
-        
-            # # Send report to Node 0 (reliable)
-            # report = {
-            #     "type": "REPORT",
-            #     "node_id": self.node_id,
-            #     "approx": approx_res,
-            #     "truth": original
-            # }
-
-            # self.send(self.peers[0][0], self.peers[0][1], report, force_mode="tcp")
-
-            # # Node 0 computes accuracy
-            # if self.node_id == 0:
-            #     self.calculate_accuracy(latency, size)
+        self.noise.clear_tc()
 
         if self.node_id == 0:
             print("\n" + "=" * 50)

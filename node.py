@@ -37,6 +37,8 @@ class Node:
 
         self.lock = threading.Lock()
         self.done_count = 0
+        self.comm_time = 0
+        self.comp_time = 0
 
         self.noise = Noise()
 

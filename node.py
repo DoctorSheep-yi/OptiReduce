@@ -43,6 +43,7 @@ class Node:
         self.opti_buffer = []
         self.received = []
         self.chunk_buffer = {}
+        self.report_buffer = []
 
         self.start_time = None
 
@@ -117,7 +118,6 @@ class Node:
     # RECEIVE
     # =========================
     def handle_message(self, msg):
-
         # UDP reassembly
         if msg.get("chunked"):
             cid = msg["chunk_id"]
@@ -151,6 +151,11 @@ class Node:
 
         elif t == "START":
             threading.Thread(target=self.run_experiment, args=(msg,), daemon=True).start()
+        
+        elif t == "REPORT":
+            # Node 0 collects these to calculate global accuracy
+            with self.lock:
+                self.report_buffer.append(msg)
 
         elif t == "DONE":
             with self.lock:
@@ -238,6 +243,15 @@ class Node:
     # =========================
     # EXPERIMENT
     # =========================
+    def clear_buffers(self):
+        """Wipes old data so experiments don't mix."""
+        with self.lock:
+            self.ring_buffer = []
+            self.opti_buffer = []
+            self.received = []
+            self.report_buffer = []
+            self.chunk_buffer = {}
+
     def run_experiment(self, msg):
         algo = msg["algo"]
         size = msg["size"]
@@ -245,25 +259,79 @@ class Node:
         print(f"\n[Node {self.node_id}] ===== START {algo.upper()} =====")
         print(f"[Node {self.node_id}] Matrix size: {size}")
 
-        grad = np.tanh(generate_matrix(size))
+        self.clear_buffers()
+        grad = generate_matrix(size)
+        self.start_time = time.time()
 
         if self.node_id == 0:
             self.done_count = 0
-            self.start_time = time.time()
 
         if algo == "ps":
             run_ps(self, grad)
+
         elif algo == "ring":
             run_ring(self, grad)
+
         elif algo == "optireduce":
-            run_optireduce(self, grad)
+            approx_res, original = run_optireduce(self, grad)
+            latency = (time.time() - self.start_time) * 1000
+
+            # Send report to Node 0 (reliable)
+            report = {
+                "type": "REPORT",
+                "node_id": self.node_id,
+                "approx": approx_res,
+                "truth": original
+            }
+
+            self.send(self.peers[0][0], self.peers[0][1], report, force_mode="tcp")
+
+            # Node 0 computes accuracy
+            if self.node_id == 0:
+                self.calculate_accuracy(latency, size)
 
         if self.node_id == 0:
-            print("\n" + "="*50)
+            print("\n" + "=" * 50)
             print(f"[RESULT] Algorithm: {algo}")
             latency_ms = (time.time() - self.start_time) * 1000
             print(f"[RESULT] Latency: {latency_ms:.2f} ms")
-            print("="*50 + "\n")
+            print("=" * 50 + "\n")
+
+
+    def calculate_accuracy(self, latency, size):
+        # Wait for all reports
+        while True:
+            with self.lock:
+                if len(self.report_buffer) >= self.num_nodes:
+                    reports = list(self.report_buffer)
+                    break
+            time.sleep(0.01)
+
+        # ===== Ground truth (global average) =====
+        true_avg = sum(r["truth"] for r in reports) / len(reports)
+
+        # ===== Approximation (average across nodes) =====
+        approx_avg = sum(r["approx"] for r in reports) / len(reports)
+
+        # ===== Metrics =====
+        mse = np.mean((true_avg - approx_avg) ** 2)
+        mae = np.mean(np.abs(true_avg - approx_avg))
+
+        # ===== Accuracy (%) =====
+        numerator = np.linalg.norm(true_avg - approx_avg)
+        denominator = np.linalg.norm(true_avg) + 1e-12
+        accuracy = (1 - numerator / denominator) * 100
+        accuracy = max(0.0, accuracy)
+
+        print("\n" + "=" * 50)
+        print(f"ALGORITHM: OPTIREDUCE | MATRIX SIZE: {size}")
+        print(f"LATENCY: {latency:.2f} ms")
+        print(f"MSE: {mse:.8e}")
+        print(f"MAE: {mae:.8e}")
+        print(f"ACCURACY: {accuracy:.2f}%")
+        print("=" * 50 + "\n")
+
+
 
     # =========================
     # CLI

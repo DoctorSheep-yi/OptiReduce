@@ -1,41 +1,77 @@
+# optireduce.py
 import numpy as np
 import time
 from globals import *
 
+def hadamard_transform(x):
+    """Fast Walsh-Hadamard Transform (FWHT), in-place"""
+    h = 1
+    x = x.copy()
+    n = len(x)
+
+    while h < n:
+        for i in range(0, n, h * 2):
+            for j in range(i, i + h):
+                a = x[j]
+                b = x[j + h]
+                x[j] = a + b
+                x[j + h] = a - b
+        h *= 2
+
+    return x
+
+
+def inverse_hadamard_transform(x):
+    """Inverse FWHT"""
+    n = len(x)
+    return hadamard_transform(x) / n
+
+def pad_to_power_of_two(x):
+    n = len(x)
+    next_pow2 = 1 << (n - 1).bit_length()
+    if next_pow2 == n:
+        return x, n
+    padded = np.zeros(next_pow2, dtype=x.dtype)
+    padded[:n] = x
+    return padded, n
+
 def run_optireduce(node, grad):
     n = node.num_nodes
-    shards = np.array_split(grad.flatten(), n)
     my_id = node.node_id
 
+    flat_grad = grad.flatten()
+
+    # ===== Hadamard encode =====
+    padded, original_len = pad_to_power_of_two(flat_grad)
+    encoded = hadamard_transform(padded)
+
+    shards = np.array_split(encoded, n)
     local_piece = shards[my_id].copy()
 
-    # send shards
+    # ===== Phase 1: Scatter =====
     for i in range(n):
         if i == my_id:
             continue
-        msg = {
+        node.send(node.peers[i][0], node.peers[i][1], {
             "algo": "optireduce",
             "phase": "shard",
             "shard_id": i,
-            "payload": shards[i].tolist()
-        }
-        node.send(node.peers[i][0], node.peers[i][1], msg)
+            "payload": shards[i]
+        })
 
-    # receive with timeout
+    # ===== Receive shards =====
     received = 0
     start = time.time()
 
-    while received < (n - 1):
-        if time.time() - start > UDP_TIMEOUT_SHORT:
-            print("[OptiReduce] UDP timeout during shard phase")
-            break
-
+    while received < (n - 1) and (time.time() - start) < UDP_TIMEOUT_SHORT:
         found = None
         with node.lock:
-            if node.opti_buffer:
-                msg = node.opti_buffer.pop(0)
-                if msg["phase"] == "shard" and msg["shard_id"] == my_id:
-                    found = np.array(msg["payload"])
+            for i, msg in enumerate(node.opti_buffer):
+                if msg.get("phase") == "shard" and msg.get("shard_id") == my_id:
+                    if msg["payload"].shape == local_piece.shape:
+                        found = msg["payload"]
+                        node.opti_buffer.pop(i)
+                        break
 
         if found is not None:
             local_piece += found
@@ -43,44 +79,51 @@ def run_optireduce(node, grad):
         else:
             time.sleep(0.001)
 
-    # approximate missing shards (paper-style idea)
-    if received < (n - 1):
-        missing = (n - 1) - received
-        print(f"[OptiReduce] Missing {missing} shards → approximating")
-        local_piece *= n / (received + 1)
+    # 🚫 NO SCALING (important fix)
 
-    # broadcast aggregated shard
+    # ===== Phase 2: All-gather =====
     for i in range(n):
         if i == my_id:
             continue
-        msg = {
+        node.send(node.peers[i][0], node.peers[i][1], {
             "algo": "optireduce",
             "phase": "agg",
             "shard_id": my_id,
-            "payload": local_piece.tolist()
-        }
-        node.send(node.peers[i][0], node.peers[i][1], msg)
+            "payload": local_piece
+        })
 
     final_shards = {my_id: local_piece}
     start = time.time()
 
-    while len(final_shards) < n:
-        if time.time() - start > UDP_TIMEOUT_SHORT:
-            print("[OptiReduce] UDP timeout during gather phase")
-            break
-
+    while len(final_shards) < n and (time.time() - start) < UDP_TIMEOUT_LONG:
         with node.lock:
-            if node.opti_buffer:
-                msg = node.opti_buffer.pop(0)
-                if msg["phase"] == "agg":
-                    final_shards[msg["shard_id"]] = np.array(msg["payload"])
-
+            for i, msg in enumerate(node.opti_buffer):
+                if msg.get("phase") == "agg":
+                    final_shards[msg["shard_id"]] = msg["payload"]
+                    node.opti_buffer.pop(i)
+                    break
         time.sleep(0.001)
 
-    # fill missing shards with zeros (or last known)
-    for i in range(n):
-        if i not in final_shards:
-            final_shards[i] = np.zeros_like(shards[i])
+    # ===== Reconstruct encoded vector =====
+    full_encoded = []
+    shard_template = np.array_split(np.zeros_like(encoded), n)
 
-    res = [final_shards[i] for i in range(n)]
-    return np.concatenate(res).reshape(grad.shape)
+    for i in range(n):
+        full_encoded.append(final_shards.get(i, shard_template[i]))
+
+    full_encoded = np.concatenate(full_encoded)
+
+    # ===== Normalize (average of received pieces) =====
+    effective_nodes = received + 1
+    full_encoded = full_encoded / max(1, effective_nodes)
+
+    # ===== Hadamard decode =====
+    decoded = inverse_hadamard_transform(full_encoded)
+
+    # Remove padding
+    decoded = decoded[:original_len]
+
+    approx = decoded.reshape(grad.shape)
+    truth = grad.copy()
+
+    return approx, truth

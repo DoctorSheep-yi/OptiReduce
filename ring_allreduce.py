@@ -6,7 +6,8 @@ def run_ring(node, grad):
     shards = np.array_split(grad.flatten(), n)
     right = (node.node_id + 1) % n
 
-    TIMEOUT = 10  # seconds
+    TIMEOUT = node.node_matrix_size/100  # seconds
+    TIMEOUT = max(TIMEOUT, 10)  # minimum timeout of 10 seconds for small matrices
 
     # 🔥 small barrier to reduce desync
     time.sleep(1)

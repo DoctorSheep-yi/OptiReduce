@@ -33,6 +33,7 @@ class Node:
         self.peers = []
         self.node_id = None
         self.num_nodes = None
+        self.node_matrix_size = None
 
         self.lock = threading.Lock()
         self.done_count = 0
@@ -261,6 +262,7 @@ class Node:
 
         self.clear_buffers()
         grad = generate_matrix(size)
+        self.node_matrix_size = size
         self.start_time = time.time()
 
         if self.node_id == 0:

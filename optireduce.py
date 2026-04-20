@@ -76,7 +76,7 @@ def run_optireduce(node, grad):
     encoded = hadamard_transform(padded)
 
     # ===== Compression (KEY FIX) =====
-    encoded = topk_sparsify(encoded, ratio=0.1)
+    # encoded = topk_sparsify(encoded, ratio=0.1)
 
     # ===== Split =====
     shards = np.array_split(encoded, n)
@@ -90,7 +90,7 @@ def run_optireduce(node, grad):
             "algo": "optireduce",
             "phase": "shard",
             "shard_id": i,
-            "payload": shards[i]
+            "payload": shards[i].tolist()
         })
 
     # ===== Receive shards =====
@@ -121,17 +121,17 @@ def run_optireduce(node, grad):
             "algo": "optireduce",
             "phase": "agg",
             "shard_id": my_id,
-            "payload": local_piece
+            "payload": local_piece.tolist()
         })
 
-    final_shards = {my_id: local_piece}
+    final_shards = {my_id: local_piece.tolist()}
     start = time.time()
 
     while len(final_shards) < n and (time.time() - start) < UDP_TIMEOUT_LONG:
         with node.lock:
             for i, msg in enumerate(node.opti_buffer):
                 if msg.get("phase") == "agg":
-                    final_shards[msg["shard_id"]] = msg["payload"]
+                    final_shards[msg["shard_id"]] = np.array(msg["payload"])
                     node.opti_buffer.pop(i)
                     break
         time.sleep(0.001)

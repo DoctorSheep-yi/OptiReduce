@@ -67,7 +67,7 @@ def topk_sparsify(x, ratio=0.1):
 
 def run_optireduce(node, grad):
     UDP_TIMEOUT_SHORT = 1
-    UDP_TIMEOUT_LONG = max(30, node.node_matrix_size/50)  # seconds, scaled with matrix size
+    UDP_TIMEOUT_LONG = max(30, node.node_matrix_size/50)
     n = node.num_nodes
     my_id = node.node_id
 
@@ -77,6 +77,7 @@ def run_optireduce(node, grad):
 
     # ===== Hadamard encode =====
     padded, original_len = pad_to_power_of_two(flat_grad)
+
     start_comp = time.time()
     encoded = hadamard_transform(padded)
     node.comp_time += time.time() - start_comp
@@ -86,7 +87,7 @@ def run_optireduce(node, grad):
     local_piece = shards[my_id].copy()
 
     # =========================
-    # PHASE 1: SCATTER (send shards)
+    # PHASE 1: SCATTER
     # =========================
     for i in range(n):
         if i == my_id:
@@ -101,9 +102,7 @@ def run_optireduce(node, grad):
             "payload": shards[i].tolist()
         })
 
-    # =========================
-    # RECEIVE SHARDS
-    # =========================
+    # ===== RECEIVE SHARDS =====
     received = 0
     start = time.time()
 
@@ -186,8 +185,9 @@ def run_optireduce(node, grad):
 
     # ===== Decode =====
     start_comp = time.time()
-    decoded = inverse_hadamard_transform(result)
+    decoded = inverse_hadamard_transform(full_encoded)   # ✅ FIXED
     node.comp_time += time.time() - start_comp
+
     decoded = decoded[:original_len]
 
     approx = decoded.reshape(grad.shape)

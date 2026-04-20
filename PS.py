@@ -23,6 +23,7 @@ def run_ps(node, grad):
             time.sleep(0.001)
 
         # ✅ COMPUTATION TIME
+        node.noise.apply_straggler()
         start_comp = time.time()
         result = np.sum(node.received, axis=0)
         node.comp_time += time.time() - start_comp

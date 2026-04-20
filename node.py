@@ -271,8 +271,22 @@ class Node:
         self.node_matrix_size = size
         self.start_time = time.time()
 
+        # =========================
+        # STRAGGLER CONFIG (ONLY ONE NODE)
+        # =========================
         if self.node_id == 0:
-            self.done_count = 0
+            self.noise.enable_straggler = True
+            self.noise.sleep_time = 0.02
+
+            self.noise.cpu_stress = True
+            self.noise.cpu_workers = 4
+        else:
+            self.noise.enable_straggler = False
+            self.noise.cpu_stress = False
+
+        # start CPU stress if enabled
+        if self.noise.cpu_stress:
+            self.noise.start_cpu_stress()
 
         if algo == "ps":
             run_ps(self, grad)
@@ -282,8 +296,10 @@ class Node:
 
         elif algo == "optireduce":
             approx_res, original = run_optireduce(self, grad)
-            latency = (time.time() - self.start_time) * 1000
+            # latency = (time.time() - self.start_time) * 1000
 
+        self.noise.stop_cpu_stress()
+        
             # # Send report to Node 0 (reliable)
             # report = {
             #     "type": "REPORT",

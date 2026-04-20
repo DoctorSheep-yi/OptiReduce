@@ -6,10 +6,9 @@ def run_ring(node, grad):
     shards = np.array_split(grad.flatten(), n)
     right = (node.node_id + 1) % n
 
-    TIMEOUT = node.node_matrix_size/50  # seconds
-    TIMEOUT = max(TIMEOUT, 10)  # minimum timeout of 10 seconds for small matrices
+    TIMEOUT = node.node_matrix_size/50
+    TIMEOUT = max(TIMEOUT, 10)
 
-    # 🔥 small barrier to reduce desync
     time.sleep(1)
 
     print(f"[Node {node.node_id}] Ring start with {n} nodes")
@@ -38,7 +37,8 @@ def run_ring(node, grad):
         start = time.time()
 
         while incoming is None:
-            # ⛔ timeout protection
+            node.noise.apply_straggler()   # ✅ FIX
+
             if time.time() - start > TIMEOUT:
                 print(f"[Node {node.node_id}] ❌ TIMEOUT in SCATTER step {step}")
                 return grad
@@ -53,7 +53,9 @@ def run_ring(node, grad):
 
             time.sleep(0.001)
 
-        # ✅ ONLY ADDITION: computation timing
+        # computation
+        node.noise.apply_straggler()   # ✅ FIX
+
         start_comp = time.time()
         target_idx = (node.node_id - step - 1) % n
         shards[target_idx] += incoming
@@ -83,7 +85,8 @@ def run_ring(node, grad):
         start = time.time()
 
         while incoming is None:
-            # ⛔ timeout protection
+            node.noise.apply_straggler()   # ✅ FIX
+
             if time.time() - start > TIMEOUT:
                 print(f"[Node {node.node_id}] ❌ TIMEOUT in GATHER step {step}")
                 return grad
@@ -99,7 +102,7 @@ def run_ring(node, grad):
             time.sleep(0.001)
 
         target_idx = (node.node_id - step) % n
-        shards[target_idx] = incoming  # ❗ no computation here (just assignment)
+        shards[target_idx] = incoming
 
     print(f"[Node {node.node_id}] Ring completed")
 

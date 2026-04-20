@@ -107,6 +107,7 @@ def run_optireduce(node, grad):
     start = time.time()
 
     while received < (n - 1) and (time.time() - start) < UDP_TIMEOUT_SHORT:
+        node.noise.apply_straggler()
         found = None
 
         with node.lock:
@@ -123,6 +124,7 @@ def run_optireduce(node, grad):
 
         if found is not None:
             start_comp = time.time()
+            node.noise.apply_straggler() 
             local_piece += found
             node.comp_time += time.time() - start_comp
             received += 1
@@ -151,6 +153,7 @@ def run_optireduce(node, grad):
     start = time.time()
 
     while len(final_shards) < n and (time.time() - start) < UDP_TIMEOUT_LONG:
+        node.noise.apply_straggler()
         with node.lock:
             for i, msg in enumerate(node.opti_buffer):
                 if msg.get("phase") == "agg":

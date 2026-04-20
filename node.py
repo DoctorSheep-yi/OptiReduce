@@ -13,9 +13,6 @@ from optireduce import run_optireduce
 from noise import Noise
 from globals import *
 
-MAX_CHUNK_SIZE = 1200
-UDP_TIMEOUT = 30
-
 
 # =========================
 # TCP helpers
@@ -65,7 +62,7 @@ class Node:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
                 # ✅ increase buffer (important for large matrices)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, TCP_BUFFER_SIZE)
 
                 sock.connect((ip, port))
                 sock.sendall(len(data).to_bytes(4, 'big') + data)
@@ -206,7 +203,7 @@ class Node:
                 try:
                     length = int.from_bytes(length_bytes, 'big')
 
-                    if 0 < length < 100_000_000:
+                    if 0 < length < 1_000_000_000:
                         # safe full read
                         data = recv_exact(conn, length)
                         if data is None:

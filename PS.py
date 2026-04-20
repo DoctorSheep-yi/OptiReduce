@@ -7,7 +7,7 @@ def run_ps(node, grad):
         print("[PS] Node 0 acting as server")
 
         with node.lock:
-            node.received = [grad.tolist()]
+            node.received = [grad]
 
         start = time.time()
 

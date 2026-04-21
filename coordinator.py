@@ -25,19 +25,40 @@ def broadcast():
                 "peers": nodes
             }
 
-            sock.sendall(pickle.dumps(msg))
+            data = pickle.dumps(msg)
+            sock.sendall(len(data).to_bytes(4, 'big') + data)
             sock.close()
-
         except Exception as e:
             print(f"[Coordinator] Failed to send to {ip}:{port}: {e}")
 
 
+def recv_exact(sock, size):
+    data = b''
+    while len(data) < size:
+        packet = sock.recv(size - len(data))
+        if not packet:
+            return None
+        data += packet
+    return data
+
 def handle_conn(conn, addr):
     global next_id
 
-    data = conn.recv(4096)
-
     try:
+        # 2. First, read the 4-byte length prefix
+        length_bytes = recv_exact(conn, 4)
+        if not length_bytes:
+            conn.close()
+            return
+
+        length = int.from_bytes(length_bytes, 'big')
+        
+        # 3. Then read exactly 'length' bytes
+        data = recv_exact(conn, length)
+        if not data:
+            conn.close()
+            return
+
         msg = pickle.loads(data)
 
         if msg["type"] == "REGISTER":
@@ -54,23 +75,13 @@ def handle_conn(conn, addr):
 
             print(f"[Coordinator] Nodes: {nodes}")
             broadcast()
-
-        elif msg["type"] == "UNREGISTER":
-            ip = addr[0]
-            port = msg["port"]
-            node = (ip, port)
-
-            with lock:
-                if node in nodes:
-                    nodes.remove(node)
-                    del node_ids[node]
-
-            broadcast()
+            
+        # ... rest of your code ...
 
     except Exception as e:
         print("Error:", e)
-
-    conn.close()
+    finally:
+        conn.close()
 
 
 def main():
